@@ -342,14 +342,14 @@ func fetchAndSyncLocked() error {
 
 		_, _ = tx.Exec(`DELETE FROM scores_history WHERE model_id = ? AND suite = 'current' AND timestamp != ?`, m.ID, ts)
 
-		if axes == nil {
+		if axes == nil || len(axes) == 0 {
 			_, err = tx.Exec(`INSERT INTO scores_history
 				(model_id, timestamp, suite, score, stupid_score, trend, confidence_lower, confidence_upper)
 				VALUES (?, ?, 'current', ?, ?, ?, ?, ?)
 				ON CONFLICT(model_id, timestamp, suite) DO UPDATE SET
 				score=excluded.score, stupid_score=excluded.stupid_score, trend=excluded.trend,
 				confidence_lower=excluded.confidence_lower, confidence_upper=excluded.confidence_upper`,
-				m.ID, ts, m.CurrentScore, float64(m.CurrentScore), m.Trend, m.ConfidenceLower, m.ConfidenceUpper)
+				m.ID, ts, m.CurrentScore, float64(m.Score), m.Trend, m.ConfidenceLower, m.ConfidenceUpper)
 		} else {
 			_, err = tx.Exec(`INSERT INTO scores_history
 				(model_id, timestamp, suite, score, stupid_score, trend, confidence_lower, confidence_upper,
@@ -366,7 +366,7 @@ func fetchAndSyncLocked() error {
 				ax_debugging=excluded.ax_debugging, ax_format=excluded.ax_format, ax_safety=excluded.ax_safety,
 				ax_memory_retention=excluded.ax_memory_retention, ax_hallucination_rate=excluded.ax_hallucination_rate,
 				ax_plan_coherence=excluded.ax_plan_coherence, ax_context_window=excluded.ax_context_window`,
-				m.ID, ts, m.CurrentScore, float64(m.CurrentScore), m.Trend, m.ConfidenceLower, m.ConfidenceUpper,
+				m.ID, ts, m.CurrentScore, float64(m.Score), m.Trend, m.ConfidenceLower, m.ConfidenceUpper,
 				axes["correctness"], axes["complexity"], axes["codeQuality"], axes["efficiency"], axes["stability"],
 				axes["edgeCases"], axes["debugging"], axes["format"], axes["safety"],
 				axes["memoryRetention"], axes["hallucinationRate"], axes["planCoherence"], axes["contextWindow"])
@@ -494,6 +494,8 @@ func fetchAndSyncLocked() error {
 		if len(recs.Data.AvoidNow) > 0 {
 			avoidJSON, _ := json.Marshal(recs.Data.AvoidNow)
 			saveRec("avoid_now", "", "", "", 0, "", "", string(avoidJSON))
+		} else {
+			_, _ = tx.Exec(`DELETE FROM recommendations WHERE type = 'avoid_now'`)
 		}
 	}
 

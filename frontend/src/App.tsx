@@ -349,6 +349,13 @@ export default function App() {
     return alerts.filter(a => !blockedNames.includes(a.modelName) && visibleNames.has(a.modelName));
   }, [alerts, models, blockedModels, filteredScores]);
 
+  useEffect(() => {
+    if (detailModel && !filteredScores.find(s => s.modelId === detailModel)) {
+      setDetailModel(null);
+      setModelHistory([]);
+    }
+  }, [detailModel, filteredScores]);
+
   const getModelColor = (modelId: string) => {
     const idx = models.findIndex(m => m.id === modelId);
     if (idx < 0) return MODEL_COLORS[0];
