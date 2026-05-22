@@ -294,15 +294,6 @@ export default function App() {
     return () => controller.abort();
   }, [fetchHistory]);
 
-  const [visibleModelsInitialized, setVisibleModelsInitialized] = useState(false);
-
-  useEffect(() => {
-    if (models.length > 0 && !visibleModelsInitialized) {
-      setVisibleModels([]);
-      setVisibleModelsInitialized(true);
-    }
-  }, [models, blockedModels, visibleModelsInitialized]);
-
   const triggerSync = async () => {
     setIsSyncing(true);
     try {
@@ -1234,7 +1225,7 @@ export default function App() {
                 >
                   综合得分
                 </button>
-                {Object.entries(AXES_ZH).slice(0, 9).map(([key, label]) => (
+                {Object.entries(AXES_ZH).filter(([key]) => !['memoryRetention', 'hallucinationRate', 'planCoherence', 'contextWindow'].includes(key)).map(([key, label]) => (
                   <button
                     key={key}
                     onClick={() => setSortBy(key)}
