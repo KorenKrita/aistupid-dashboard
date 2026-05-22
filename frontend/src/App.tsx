@@ -238,17 +238,23 @@ export default function App() {
       ]);
       const [modelsRes, latestScoresRes, degradRes, alertsRes, globalRes, provRes, recRes, syncRes, configRes] = responses;
 
-      setModels(await modelsRes.json());
-      setScores(await latestScoresRes.json());
-      setDegradations(await degradRes.json());
-      setAlerts(await alertsRes.json());
-      setGlobalIndex(await globalRes.json());
-      setProviderReliability(await provRes.json());
-      setRecommendations(await recRes.json());
-      setSyncStatus(await syncRes.json());
+      const safeJson = async (res: Response) => res.ok ? res.json() : null;
 
-      const config = await configRes.json();
-      setBlockedModels(config.blocked_models || []);
+      const [modelsData, scoresData, degradData, alertsData, globalData, provData, recData, syncData, configData] = await Promise.all([
+        safeJson(modelsRes), safeJson(latestScoresRes), safeJson(degradRes),
+        safeJson(alertsRes), safeJson(globalRes), safeJson(provRes),
+        safeJson(recRes), safeJson(syncRes), safeJson(configRes)
+      ]);
+
+      if (modelsData) setModels(modelsData);
+      if (scoresData) setScores(scoresData);
+      if (degradData) setDegradations(degradData);
+      if (alertsData) setAlerts(alertsData);
+      if (globalData) setGlobalIndex(globalData);
+      if (provData) setProviderReliability(provData);
+      if (recData) setRecommendations(recData);
+      if (syncData) setSyncStatus(syncData);
+      if (configData) setBlockedModels(configData.blocked_models || []);
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
       console.error('Fetch error:', e);
@@ -672,8 +678,8 @@ export default function App() {
       },
       yAxis: {
         type: 'value',
-        min: isAxisMode ? 0 : (value: { min: number }) => Math.max(0, Math.floor(value.min * 0.9)),
-        max: isAxisMode ? 100 : (value: { max: number }) => Math.min(100, Math.ceil(value.max * 1.05)),
+        min: (value: { min: number }) => Math.max(0, Math.floor(value.min - (isAxisMode ? 5 : value.min * 0.1))),
+        max: (value: { max: number }) => Math.min(100, Math.ceil(value.max + (isAxisMode ? 5 : value.max * 0.05))),
         splitLine: { lineStyle: { color: isDark ? '#334155' : '#f1f5f9', type: 'dashed' } },
         axisLine: { show: false },
         axisLabel: {

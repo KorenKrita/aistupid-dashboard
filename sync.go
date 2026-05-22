@@ -520,7 +520,7 @@ func fetchAndSyncLocked() error {
 	}
 
 	// Prune old data (60 days)
-	cutoff := time.Now().AddDate(0, 0, -60)
+	cutoff := time.Now().UTC().AddDate(0, 0, -60)
 	_, _ = tx.Exec("DELETE FROM scores_history WHERE timestamp < ?", cutoff)
 	_, _ = tx.Exec("DELETE FROM global_index WHERE timestamp < ?", cutoff)
 
