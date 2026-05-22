@@ -237,9 +237,10 @@ func TestIntegrationFlow(t *testing.T) {
 		if err := json.Unmarshal(recScoresHist.Body.Bytes(), &scoresHist); err != nil {
 			t.Fatalf("Failed to unmarshal scores history: %v", err)
 		}
-		// Expect 2 points: history (score 84, suite standard) and current (score 85, suite current)
-		if len(scoresHist) != 2 {
-			t.Errorf("Expected 2 scores history points, got %d: %+v", len(scoresHist), scoresHist)
+		// Expect 1 point: only non-current history (score 84, suite standard)
+		// suite='current' records are filtered out by handleModelHistory
+		if len(scoresHist) != 1 {
+			t.Errorf("Expected 1 scores history point (current filtered out), got %d: %+v", len(scoresHist), scoresHist)
 		}
 
 		// Query handleDegradations

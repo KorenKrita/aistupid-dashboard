@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -39,15 +40,16 @@ func loadConfig() {
 	}
 }
 
-func saveConfig() error {
-	configMu.Lock()
-	defer configMu.Unlock()
-
-	data, err := json.MarshalIndent(config, "", "  ")
+func saveConfigData(models []string) error {
+	data, err := json.MarshalIndent(Config{BlockedModels: models}, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile("config.json", data, 0644)
+	tmp := "config.json.tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, "config.json")
 }
 
 func getBlockedModels() []string {
@@ -58,18 +60,44 @@ func getBlockedModels() []string {
 	return result
 }
 
-func setBlockedModels(models []string) {
+func setBlockedModels(models []string) error {
 	configMu.Lock()
 	config.BlockedModels = models
+	snapshot := make([]string, len(models))
+	copy(snapshot, models)
 	configMu.Unlock()
-	go func() { _ = saveConfig() }()
+	return saveConfigData(snapshot)
 }
 
 func handleConfig(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"blocked_models": getBlockedModels(),
-	})
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"blocked_models": getBlockedModels(),
+		})
+	case http.MethodPost:
+		var body struct {
+			BlockedModels []string `json:"blocked_models"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		if body.BlockedModels == nil {
+			body.BlockedModels = []string{}
+		}
+		if err := setBlockedModels(body.BlockedModels); err != nil {
+			http.Error(w, "Failed to save config", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"blocked_models": getBlockedModels(),
+		})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
@@ -162,7 +190,8 @@ func handleScores(w http.ResponseWriter, r *http.Request) {
 				h.ax_memory_retention, h.ax_hallucination_rate, h.ax_plan_coherence, h.ax_context_window
 			FROM scores_history h
 			JOIN models m ON h.model_id = m.id
-			WHERE h.timestamp = (SELECT MAX(timestamp) FROM scores_history WHERE model_id = h.model_id)
+			WHERE h.suite = 'current'
+			AND h.timestamp = (SELECT MAX(timestamp) FROM scores_history WHERE model_id = h.model_id AND suite = 'current')
 			ORDER BY h.score DESC`)
 		if qErr != nil {
 			http.Error(w, qErr.Error(), http.StatusInternalServerError)
@@ -195,7 +224,7 @@ func handleScores(w http.ResponseWriter, r *http.Request) {
 			h.ax_memory_retention, h.ax_hallucination_rate, h.ax_plan_coherence, h.ax_context_window
 		FROM scores_history h
 		JOIN models m ON h.model_id = m.id
-		WHERE h.timestamp >= ?
+		WHERE h.timestamp >= ? AND h.suite != 'current'
 		ORDER BY h.timestamp ASC`, cutoff)
 	if err != nil {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -488,7 +517,13 @@ func handleManualSync(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	err := FetchAndSync()
+	acquired, err := TryFetchAndSync()
+	if !acquired {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "sync already in progress"})
+		return
+	}
 	if err != nil {
 		http.Error(w, "Sync failed", http.StatusInternalServerError)
 		return
@@ -519,7 +554,7 @@ func handleModelHistory(w http.ResponseWriter, r *http.Request) {
 			ax_edge_cases, ax_debugging, ax_format, ax_safety,
 			ax_memory_retention, ax_hallucination_rate, ax_plan_coherence, ax_context_window
 		FROM scores_history
-		WHERE model_id = ? AND timestamp >= ?
+		WHERE model_id = ? AND timestamp >= ? AND suite != 'current'
 		ORDER BY timestamp ASC`, modelID, cutoff)
 	if err != nil {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -584,7 +619,10 @@ func main() {
 	if err := FetchAndSync(); err != nil {
 		fmt.Println("Initial sync error:", err)
 	}
-	go StartSyncWorkerLoop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	syncCancel = cancel
+	go StartSyncWorkerLoop(ctx)
 	SetupRoutes()
 
 	subDist, err := fs.Sub(frontendDist, "frontend/dist")
@@ -607,7 +645,13 @@ func main() {
 		fileServer.ServeHTTP(w, r)
 	}))
 
-	if err := http.ListenAndServe("127.0.0.1:3223", nil); err != nil {
+	server := &http.Server{
+		Addr:         "127.0.0.1:3223",
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+	if err := server.ListenAndServe(); err != nil {
 		fmt.Println("Server error:", err)
 	}
 }

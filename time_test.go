@@ -384,15 +384,15 @@ func TestTimeParsingAndFallbacks(t *testing.T) {
 		}
 
 		// 2. Scores history fallback verification:
-		// In sync.go lines 250 & 278: if parsing of timestamps fails, it `continue`s (skips inserting).
-		// So we expect NO rows in scores_history.
+		// In sync.go: if parsing of LastUpdated fails, time.Now().UTC() is used as fallback.
+		// So we expect rows in scores_history with the fallback timestamp.
 		var scoresCount int
 		err = DB.QueryRow("SELECT COUNT(*) FROM scores_history").Scan(&scoresCount)
 		if err != nil {
 			t.Fatalf("Query scores_history count failed: %v", err)
 		}
-		if scoresCount != 0 {
-			t.Errorf("Expected scores_history to be empty because invalid timestamps should be skipped, but got %d records", scoresCount)
+		if scoresCount == 0 {
+			t.Errorf("Expected scores_history to have records (fallback timestamp used for invalid LastUpdated), but got 0")
 		}
 	})
 }

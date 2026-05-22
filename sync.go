@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,6 +14,7 @@ var (
 	lastSyncTime time.Time
 	lastSyncMu   sync.RWMutex
 	syncMu       sync.Mutex
+	syncCancel   context.CancelFunc
 	apiBaseURL   = "https://aistupidlevel.info"
 )
 
@@ -158,16 +160,16 @@ type TransparencyResponse struct {
 	Success bool `json:"success"`
 	Data    struct {
 		Summary struct {
-			LastUpdate     string `json:"lastUpdate"`
-			TotalTests     int    `json:"totalTests"`
-			PassedTests    int    `json:"passedTests"`
-			Coverage       int    `json:"coverage"`
-			Confidence     int    `json:"confidence"`
-			DataPoints24h  int    `json:"dataPoints24h"`
-			NextTest       string `json:"nextTest"`
-			ModelsFresh    int    `json:"modelsFresh"`
-			ModelsStale    int    `json:"modelsStale"`
-			ModelsOffline  int    `json:"modelsOffline"`
+			LastUpdate    string `json:"lastUpdate"`
+			TotalTests    int    `json:"totalTests"`
+			PassedTests   int    `json:"passedTests"`
+			Coverage      int    `json:"coverage"`
+			Confidence    int    `json:"confidence"`
+			DataPoints24h int    `json:"dataPoints24h"`
+			NextTest      string `json:"nextTest"`
+			ModelsFresh   int    `json:"modelsFresh"`
+			ModelsStale   int    `json:"modelsStale"`
+			ModelsOffline int    `json:"modelsOffline"`
 		} `json:"summary"`
 		ModelFreshness []struct {
 			Model      string `json:"model"`
@@ -202,17 +204,44 @@ func fetchJSON(path string, target interface{}) error {
 func FetchAndSync() error {
 	syncMu.Lock()
 	defer syncMu.Unlock()
+	return fetchAndSyncLocked()
+}
+
+func TryFetchAndSync() (bool, error) {
+	if !syncMu.TryLock() {
+		return false, nil
+	}
+	defer syncMu.Unlock()
+	return true, fetchAndSyncLocked()
+}
+
+func fetchAndSyncLocked() error {
+
+	var cached CachedResponse
+	if err := fetchJSON("/dashboard/cached", &cached); err != nil {
+		return fmt.Errorf("fetch cached: %w", err)
+	}
+
+	var alertsResp AlertsResponse
+	fetchJSON("/dashboard/alerts", &alertsResp)
+
+	var globalIdx GlobalIndexResponse
+	fetchJSON("/dashboard/global-index", &globalIdx)
+
+	var provRel ProviderReliabilityResponse
+	fetchJSON("/analytics/provider-reliability", &provRel)
+
+	var recs RecommendationsResponse
+	fetchJSON("/analytics/recommendations", &recs)
+
+	var trans TransparencyResponse
+	fetchJSON("/analytics/transparency", &trans)
 
 	tx, err := DB.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-
-	var cached CachedResponse
-	if err := fetchJSON("/dashboard/cached", &cached); err != nil {
-		return fmt.Errorf("fetch cached: %w", err)
-	}
 
 	for _, m := range cached.Data.ModelScores {
 		isReasoning, isNew, isStale := 0, 0, 0
@@ -225,86 +254,107 @@ func FetchAndSync() error {
 		if m.IsStale {
 			isStale = 1
 		}
-		_, _ = tx.Exec(`INSERT INTO models (id, name, provider, vendor, is_reasoning, is_new, is_stale, status, standard_error)
+		if _, err := tx.Exec(`INSERT INTO models (id, name, provider, vendor, is_reasoning, is_new, is_stale, status, standard_error)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name, provider=excluded.provider, vendor=excluded.vendor,
 			is_reasoning=excluded.is_reasoning, is_new=excluded.is_new, is_stale=excluded.is_stale,
 			status=excluded.status, standard_error=excluded.standard_error`,
-			m.ID, m.Name, m.Provider, m.Vendor, isReasoning, isNew, isStale, m.Status, m.StandardError)
+			m.ID, m.Name, m.Provider, m.Vendor, isReasoning, isNew, isStale, m.Status, m.StandardError); err != nil {
+			return fmt.Errorf("insert model %s: %w", m.ID, err)
+		}
 	}
 
-	// Build trend/confidence map from modelScores
-	modelTrendMap := make(map[string]string)
-	modelConfMap := make(map[string][2]float64)
-	for _, m := range cached.Data.ModelScores {
-		modelTrendMap[m.ID] = m.Trend
-		modelConfMap[m.ID] = [2]float64{m.ConfidenceLower, m.ConfidenceUpper}
-	}
-
-	// Insert history (only new records, local takes precedence)
 	for modelID, points := range cached.Data.HistoryMap {
-		trend := modelTrendMap[modelID]
-		conf := modelConfMap[modelID]
 		for _, pt := range points {
 			ts, err := time.Parse(time.RFC3339, pt.Timestamp)
 			if err != nil {
 				continue
 			}
+			suite := pt.Suite
+			if suite == "" {
+				suite = "test"
+			}
 			axes := pt.Axes
 			if axes == nil {
-				_, _ = tx.Exec(`INSERT OR IGNORE INTO scores_history
-					(model_id, timestamp, score, stupid_score, trend, confidence_lower, confidence_upper, suite)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-					modelID, ts, pt.Score, pt.StupidScore, trend, conf[0], conf[1], pt.Suite)
+				_, err = tx.Exec(`INSERT INTO scores_history
+					(model_id, timestamp, suite, score, stupid_score, confidence_lower, confidence_upper)
+					VALUES (?, ?, ?, ?, ?, ?, ?)
+					ON CONFLICT(model_id, timestamp, suite) DO UPDATE SET
+					score=excluded.score, stupid_score=excluded.stupid_score,
+					confidence_lower=excluded.confidence_lower, confidence_upper=excluded.confidence_upper`,
+					modelID, ts, suite, pt.Score, pt.StupidScore, pt.ConfidenceLower, pt.ConfidenceUpper)
 			} else {
-				_, _ = tx.Exec(`INSERT OR IGNORE INTO scores_history
-					(model_id, timestamp, score, stupid_score, trend, confidence_lower, confidence_upper, suite,
+				_, err = tx.Exec(`INSERT INTO scores_history
+					(model_id, timestamp, suite, score, stupid_score, confidence_lower, confidence_upper,
 					ax_correctness, ax_complexity, ax_code_quality, ax_efficiency, ax_stability,
 					ax_edge_cases, ax_debugging, ax_format, ax_safety,
 					ax_memory_retention, ax_hallucination_rate, ax_plan_coherence, ax_context_window)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-					modelID, ts, pt.Score, pt.StupidScore, trend, conf[0], conf[1], pt.Suite,
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					ON CONFLICT(model_id, timestamp, suite) DO UPDATE SET
+					score=excluded.score, stupid_score=excluded.stupid_score,
+					confidence_lower=excluded.confidence_lower, confidence_upper=excluded.confidence_upper,
+					ax_correctness=excluded.ax_correctness, ax_complexity=excluded.ax_complexity,
+					ax_code_quality=excluded.ax_code_quality, ax_efficiency=excluded.ax_efficiency,
+					ax_stability=excluded.ax_stability, ax_edge_cases=excluded.ax_edge_cases,
+					ax_debugging=excluded.ax_debugging, ax_format=excluded.ax_format, ax_safety=excluded.ax_safety,
+					ax_memory_retention=excluded.ax_memory_retention, ax_hallucination_rate=excluded.ax_hallucination_rate,
+					ax_plan_coherence=excluded.ax_plan_coherence, ax_context_window=excluded.ax_context_window`,
+					modelID, ts, suite, pt.Score, pt.StupidScore, pt.ConfidenceLower, pt.ConfidenceUpper,
 					axes["correctness"], axes["complexity"], axes["codeQuality"], axes["efficiency"], axes["stability"],
 					axes["edgeCases"], axes["debugging"], axes["format"], axes["safety"],
 					axes["memoryRetention"], axes["hallucinationRate"], axes["planCoherence"], axes["contextWindow"])
 			}
+			if err != nil {
+				fmt.Printf("Warning: insert history %s@%s: %v\n", modelID, pt.Timestamp, err)
+			}
 		}
 	}
 
-	// Insert current scores from modelScores with axes from latest historyMap entry
 	for _, m := range cached.Data.ModelScores {
 		ts, err := time.Parse(time.RFC3339, m.LastUpdated)
 		if err != nil {
-			continue
+			ts = time.Now().UTC()
 		}
-		// Get axes from the latest historyMap entry for this model
 		var axes map[string]float64
 		if points, ok := cached.Data.HistoryMap[m.ID]; ok && len(points) > 0 {
 			axes = points[len(points)-1].Axes
 		}
-		// Skip axes insertion if no history data available
 		if axes == nil {
-			_, _ = tx.Exec(`INSERT OR REPLACE INTO scores_history
-				(model_id, timestamp, score, stupid_score, trend, confidence_lower, confidence_upper, suite)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-				m.ID, ts, m.CurrentScore, float64(m.CurrentScore), m.Trend, m.ConfidenceLower, m.ConfidenceUpper, "current")
+			_, err = tx.Exec(`INSERT INTO scores_history
+				(model_id, timestamp, suite, score, stupid_score, trend, confidence_lower, confidence_upper)
+				VALUES (?, ?, 'current', ?, ?, ?, ?, ?)
+				ON CONFLICT(model_id, timestamp, suite) DO UPDATE SET
+				score=excluded.score, stupid_score=excluded.stupid_score, trend=excluded.trend,
+				confidence_lower=excluded.confidence_lower, confidence_upper=excluded.confidence_upper`,
+				m.ID, ts, m.CurrentScore, float64(m.CurrentScore), m.Trend, m.ConfidenceLower, m.ConfidenceUpper)
 		} else {
-			_, _ = tx.Exec(`INSERT OR REPLACE INTO scores_history
-				(model_id, timestamp, score, stupid_score, trend, confidence_lower, confidence_upper, suite,
+			_, err = tx.Exec(`INSERT INTO scores_history
+				(model_id, timestamp, suite, score, stupid_score, trend, confidence_lower, confidence_upper,
 				ax_correctness, ax_complexity, ax_code_quality, ax_efficiency, ax_stability,
 				ax_edge_cases, ax_debugging, ax_format, ax_safety,
 				ax_memory_retention, ax_hallucination_rate, ax_plan_coherence, ax_context_window)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				m.ID, ts, m.CurrentScore, float64(m.CurrentScore), m.Trend, m.ConfidenceLower, m.ConfidenceUpper, "current",
+				VALUES (?, ?, 'current', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				ON CONFLICT(model_id, timestamp, suite) DO UPDATE SET
+				score=excluded.score, stupid_score=excluded.stupid_score, trend=excluded.trend,
+				confidence_lower=excluded.confidence_lower, confidence_upper=excluded.confidence_upper,
+				ax_correctness=excluded.ax_correctness, ax_complexity=excluded.ax_complexity,
+				ax_code_quality=excluded.ax_code_quality, ax_efficiency=excluded.ax_efficiency,
+				ax_stability=excluded.ax_stability, ax_edge_cases=excluded.ax_edge_cases,
+				ax_debugging=excluded.ax_debugging, ax_format=excluded.ax_format, ax_safety=excluded.ax_safety,
+				ax_memory_retention=excluded.ax_memory_retention, ax_hallucination_rate=excluded.ax_hallucination_rate,
+				ax_plan_coherence=excluded.ax_plan_coherence, ax_context_window=excluded.ax_context_window`,
+				m.ID, ts, m.CurrentScore, float64(m.CurrentScore), m.Trend, m.ConfidenceLower, m.ConfidenceUpper,
 				axes["correctness"], axes["complexity"], axes["codeQuality"], axes["efficiency"], axes["stability"],
 				axes["edgeCases"], axes["debugging"], axes["format"], axes["safety"],
 				axes["memoryRetention"], axes["hallucinationRate"], axes["planCoherence"], axes["contextWindow"])
 		}
+		if err != nil {
+			fmt.Printf("Warning: insert current score %s: %v\n", m.ID, err)
+		}
 	}
 
-	// Update degradations (keep first detected_at for same alerts)
-	// Build set of current degradation keys
+	// Degradations: upsert current, remove stale
 	currentKeys := make(map[string]bool)
 	for _, d := range cached.Data.Degradations {
 		var modelIDStr string
@@ -312,7 +362,7 @@ func FetchAndSync() error {
 		case string:
 			modelIDStr = v
 		case float64:
-			modelIDStr = strconv.Itoa(int(v))
+			modelIDStr = strconv.FormatInt(int64(v), 10)
 		default:
 			continue
 		}
@@ -322,28 +372,24 @@ func FetchAndSync() error {
 		key := modelIDStr + "|" + d.Type + "|" + d.Message
 		currentKeys[key] = true
 
-		// Parse API-provided detection time, fallback to now if invalid
 		detectedAt, err := time.Parse(time.RFC3339, d.DetectedAt)
 		if err != nil {
 			detectedAt = time.Now().UTC()
 		}
 
-		// INSERT OR IGNORE keeps the first detected_at
-		_, _ = tx.Exec(`INSERT OR IGNORE INTO degradations
+		_, _ = tx.Exec(`INSERT INTO degradations
 			(model_id, model_name, provider, current_score, baseline_score, drop_percentage, z_score, severity, detected_at, message, type)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(model_id, type, message) DO UPDATE SET
+			current_score=excluded.current_score, baseline_score=excluded.baseline_score,
+			drop_percentage=excluded.drop_percentage, z_score=excluded.z_score, severity=excluded.severity`,
 			modelIDStr, d.ModelName, d.Provider, d.CurrentScore, d.BaselineScore, d.DropPercentage, d.ZScore, d.Severity, detectedAt, d.Message, d.Type)
-
-		// Update other fields (but not detected_at)
-		_, _ = tx.Exec(`UPDATE degradations SET current_score=?, baseline_score=?, drop_percentage=?, z_score=?, severity=?
-			WHERE model_id=? AND type=? AND message=?`,
-			d.CurrentScore, d.BaselineScore, d.DropPercentage, d.ZScore, d.Severity, modelIDStr, d.Type, d.Message)
 	}
 
-	// Remove degradations that are no longer in API response
 	rows, err := tx.Query(`SELECT model_id, type, message FROM degradations`)
-	var toDelete []struct{ modelID, typ, msg string }
 	if err == nil {
+		defer rows.Close()
+		var toDelete []struct{ modelID, typ, msg string }
 		for rows.Next() {
 			var modelID, typ, msg string
 			if err := rows.Scan(&modelID, &typ, &msg); err == nil {
@@ -354,25 +400,23 @@ func FetchAndSync() error {
 			}
 		}
 		rows.Close()
-	}
-	for _, d := range toDelete {
-		_, _ = tx.Exec(`DELETE FROM degradations WHERE model_id=? AND type=? AND message=?`, d.modelID, d.typ, d.msg)
+		for _, d := range toDelete {
+			_, _ = tx.Exec(`DELETE FROM degradations WHERE model_id=? AND type=? AND message=?`, d.modelID, d.typ, d.msg)
+		}
 	}
 
-	// 2. Fetch alerts
-	var alerts AlertsResponse
-	if err := fetchJSON("/dashboard/alerts", &alerts); err == nil && alerts.Success {
+	// Alerts: full replacement
+	if alertsResp.Success {
 		_, _ = tx.Exec("DELETE FROM alerts")
-		for _, a := range alerts.Data {
+		for _, a := range alertsResp.Data {
 			detectedAt, _ := time.Parse(time.RFC3339, a.DetectedAt)
 			_, _ = tx.Exec(`INSERT INTO alerts (model_name, provider, issue, severity, detected_at)
 				VALUES (?, ?, ?, ?, ?)`, a.Name, a.Provider, a.Issue, a.Severity, detectedAt)
 		}
 	}
 
-	// 3. Fetch global index
-	var globalIdx GlobalIndexResponse
-	if err := fetchJSON("/dashboard/global-index", &globalIdx); err == nil && globalIdx.Success {
+	// Global index
+	if globalIdx.Success {
 		for _, h := range globalIdx.Data.History {
 			ts, _ := time.Parse(time.RFC3339, h.Timestamp)
 			_, _ = tx.Exec(`INSERT OR IGNORE INTO global_index (timestamp, global_score, models_count, trend, performing_well, total_models)
@@ -381,9 +425,8 @@ func FetchAndSync() error {
 		}
 	}
 
-	// 4. Fetch provider reliability
-	var provRel ProviderReliabilityResponse
-	if err := fetchJSON("/analytics/provider-reliability", &provRel); err == nil && provRel.Success {
+	// Provider reliability
+	if provRel.Success {
 		for _, p := range provRel.Data {
 			lastIncident, _ := time.Parse(time.RFC3339, p.LastIncident)
 			isAvail := 0
@@ -403,9 +446,8 @@ func FetchAndSync() error {
 		}
 	}
 
-	// 5. Fetch recommendations
-	var recs RecommendationsResponse
-	if err := fetchJSON("/analytics/recommendations", &recs); err == nil && recs.Success {
+	// Recommendations
+	if recs.Success {
 		saveRec := func(recType, id, name, vendor string, score int, reason, evidence, extra string) {
 			if id == "" && extra == "" {
 				_, _ = tx.Exec(`DELETE FROM recommendations WHERE type = ?`, recType)
@@ -431,9 +473,8 @@ func FetchAndSync() error {
 		}
 	}
 
-	// 6. Fetch transparency
-	var trans TransparencyResponse
-	if err := fetchJSON("/analytics/transparency", &trans); err == nil && trans.Success {
+	// Transparency
+	if trans.Success {
 		s := trans.Data.Summary
 		lastUpdate, _ := time.Parse(time.RFC3339, s.LastUpdate)
 		nextTest, _ := time.Parse(time.RFC3339, s.NextTest)
@@ -454,7 +495,7 @@ func FetchAndSync() error {
 		}
 	}
 
-	// 7. Prune old data (60 days)
+	// Prune old data (60 days)
 	cutoff := time.Now().AddDate(0, 0, -60)
 	_, _ = tx.Exec("DELETE FROM scores_history WHERE timestamp < ?", cutoff)
 	_, _ = tx.Exec("DELETE FROM global_index WHERE timestamp < ?", cutoff)
@@ -466,7 +507,7 @@ func FetchAndSync() error {
 	return nil
 }
 
-func StartSyncWorkerLoop() {
+func StartSyncWorkerLoop(ctx context.Context) {
 	for {
 		now := time.Now()
 		nextMinute := ((now.Minute() / 10) + 1) * 10
@@ -479,7 +520,19 @@ func StartSyncWorkerLoop() {
 
 		sleepDuration := nextSync.Sub(now)
 		if sleepDuration > 0 {
-			time.Sleep(sleepDuration)
+			timer := time.NewTimer(sleepDuration)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		default:
 		}
 
 		if err := FetchAndSync(); err != nil {

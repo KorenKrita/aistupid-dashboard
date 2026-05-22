@@ -2,11 +2,80 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 
 	_ "modernc.org/sqlite"
 )
 
 var DB *sql.DB
+
+func migrateScoresHistory() error {
+	var count int
+	err := DB.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('scores_history') WHERE name='suite' AND pk > 0`).Scan(&count)
+	if err != nil {
+		return nil
+	}
+	if count > 0 {
+		return nil
+	}
+
+	var tableExists int
+	DB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='scores_history'`).Scan(&tableExists)
+	if tableExists == 0 {
+		return nil
+	}
+
+	fmt.Println("Migrating scores_history: adding suite to PRIMARY KEY...")
+	_, err = DB.Exec(`ALTER TABLE scores_history RENAME TO scores_history_old`)
+	if err != nil {
+		return fmt.Errorf("migration rename: %w", err)
+	}
+	_, err = DB.Exec(`CREATE TABLE scores_history (
+		model_id TEXT NOT NULL,
+		timestamp DATETIME NOT NULL,
+		suite TEXT NOT NULL DEFAULT '',
+		score INTEGER NOT NULL,
+		stupid_score REAL,
+		trend TEXT,
+		confidence_lower REAL,
+		confidence_upper REAL,
+		ax_correctness REAL,
+		ax_complexity REAL,
+		ax_code_quality REAL,
+		ax_efficiency REAL,
+		ax_stability REAL,
+		ax_edge_cases REAL,
+		ax_debugging REAL,
+		ax_format REAL,
+		ax_safety REAL,
+		ax_memory_retention REAL,
+		ax_hallucination_rate REAL,
+		ax_plan_coherence REAL,
+		ax_context_window REAL,
+		PRIMARY KEY (model_id, timestamp, suite),
+		FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE CASCADE
+	)`)
+	if err != nil {
+		DB.Exec(`ALTER TABLE scores_history_old RENAME TO scores_history`)
+		return fmt.Errorf("migration create: %w", err)
+	}
+	_, err = DB.Exec(`INSERT OR IGNORE INTO scores_history
+		(model_id, timestamp, suite, score, stupid_score, trend, confidence_lower, confidence_upper,
+		 ax_correctness, ax_complexity, ax_code_quality, ax_efficiency, ax_stability,
+		 ax_edge_cases, ax_debugging, ax_format, ax_safety,
+		 ax_memory_retention, ax_hallucination_rate, ax_plan_coherence, ax_context_window)
+		SELECT model_id, timestamp, COALESCE(suite, ''), score, stupid_score, trend, confidence_lower, confidence_upper,
+		 ax_correctness, ax_complexity, ax_code_quality, ax_efficiency, ax_stability,
+		 ax_edge_cases, ax_debugging, ax_format, ax_safety,
+		 ax_memory_retention, ax_hallucination_rate, ax_plan_coherence, ax_context_window
+		FROM scores_history_old`)
+	if err != nil {
+		return fmt.Errorf("migration copy: %w", err)
+	}
+	_, _ = DB.Exec(`DROP TABLE scores_history_old`)
+	fmt.Println("Migration complete.")
+	return nil
+}
 
 func InitDB(filepath string) error {
 	var err error
@@ -15,6 +84,10 @@ func InitDB(filepath string) error {
 		return err
 	}
 	DB.SetMaxOpenConns(1)
+
+	if err := migrateScoresHistory(); err != nil {
+		return fmt.Errorf("migration: %w", err)
+	}
 
 	schemas := []string{
 		`CREATE TABLE IF NOT EXISTS models (
@@ -32,12 +105,12 @@ func InitDB(filepath string) error {
 		`CREATE TABLE IF NOT EXISTS scores_history (
 			model_id TEXT NOT NULL,
 			timestamp DATETIME NOT NULL,
+			suite TEXT NOT NULL DEFAULT '',
 			score INTEGER NOT NULL,
 			stupid_score REAL,
 			trend TEXT,
 			confidence_lower REAL,
 			confidence_upper REAL,
-			suite TEXT,
 			ax_correctness REAL,
 			ax_complexity REAL,
 			ax_code_quality REAL,
@@ -51,7 +124,7 @@ func InitDB(filepath string) error {
 			ax_hallucination_rate REAL,
 			ax_plan_coherence REAL,
 			ax_context_window REAL,
-			PRIMARY KEY (model_id, timestamp),
+			PRIMARY KEY (model_id, timestamp, suite),
 			FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE CASCADE
 		);`,
 

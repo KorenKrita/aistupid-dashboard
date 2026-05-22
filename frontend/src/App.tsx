@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useRef, useLayoutEffect } from 'react';
+import { useEffect, useState, useMemo, useRef, useLayoutEffect, useCallback } from 'react';
 import ReactECharts from 'echarts-for-react';
 import {
   Sun, Moon, RefreshCw, Activity, TrendingUp,
@@ -223,24 +223,24 @@ export default function App() {
     document.documentElement.classList.toggle('dark', theme === 'dark');
   }, []);
 
-  const fetchAll = async () => {
+  const fetchAll = useCallback(async (signal?: AbortSignal) => {
     if (period !== 'latest') {
       setIsLoadingHistory(true);
     }
     try {
       const requests = [
-        fetch('/api/models'),
-        fetch('/api/scores?period=latest'),
-        fetch('/api/degradations'),
-        fetch('/api/alerts'),
-        fetch('/api/global-index'),
-        fetch('/api/provider-reliability'),
-        fetch('/api/recommendations'),
-        fetch('/api/sync-status'),
-        fetch('/api/config')
+        fetch('/api/models', { signal }),
+        fetch('/api/scores?period=latest', { signal }),
+        fetch('/api/degradations', { signal }),
+        fetch('/api/alerts', { signal }),
+        fetch('/api/global-index', { signal }),
+        fetch('/api/provider-reliability', { signal }),
+        fetch('/api/recommendations', { signal }),
+        fetch('/api/sync-status', { signal }),
+        fetch('/api/config', { signal })
       ];
       if (period !== 'latest') {
-        requests.push(fetch(`/api/scores?period=${period}`));
+        requests.push(fetch(`/api/scores?period=${period}`, { signal }));
       }
 
       const responses = await Promise.all(requests);
@@ -265,27 +265,28 @@ export default function App() {
       const config = await configRes.json();
       setBlockedModels(config.blocked_models || []);
     } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') return;
       console.error('Fetch error:', e);
     } finally {
       setIsLoadingHistory(false);
     }
-  };
+  }, [period]);
 
   useEffect(() => {
-    fetchAll();
+    const controller = new AbortController();
+    fetchAll(controller.signal);
     const configInterval = setInterval(async () => {
       try {
-        const res = await fetch('/api/config');
+        const res = await fetch('/api/config', { signal: controller.signal });
         const data = await res.json();
         setBlockedModels(data.blocked_models || []);
       } catch {}
     }, 5000);
-    return () => clearInterval(configInterval);
-  }, []);
-
-  useEffect(() => {
-    fetchAll();
-  }, [period]);
+    return () => {
+      controller.abort();
+      clearInterval(configInterval);
+    };
+  }, [fetchAll]);
 
   const [visibleModelsInitialized, setVisibleModelsInitialized] = useState(false);
 
