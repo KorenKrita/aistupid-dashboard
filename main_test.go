@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -20,45 +19,97 @@ func TestMainAPI(t *testing.T) {
 
 	SetupRoutes()
 
-	// 1. Test Auth Status: should be uninitialized
-	req := httptest.NewRequest("GET", "/api/auth/status", nil)
+	// Test GET /api/models (should return empty list on fresh DB)
+	req := httptest.NewRequest("GET", "/api/models", nil)
 	w := httptest.NewRecorder()
-	handleAuthStatus(w, req)
+	handleModels(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", w.Code)
 	}
 
-	var statusRes map[string]interface{}
-	_ = json.Unmarshal(w.Body.Bytes(), &statusRes)
-	if statusRes["initialized"] == true {
-		t.Error("Expected system to be uninitialized initially")
+	var models []map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &models); err != nil {
+		t.Fatalf("Failed to unmarshal models response: %v", err)
 	}
 
-	// 2. Test Setup: register admin
-	setupData := map[string]string{
-		"username": "admin",
-		"password": "securepassword",
-	}
-	body, _ := json.Marshal(setupData)
-	req = httptest.NewRequest("POST", "/api/auth/setup", bytes.NewBuffer(body))
+	// Test GET /api/scores
+	req = httptest.NewRequest("GET", "/api/scores", nil)
 	w = httptest.NewRecorder()
-	handleSetup(w, req)
+	handleScores(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Errorf("Expected setup status 201 Created, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
 	}
 
-	// 3. Test Auth Status: should now be initialized but unauthenticated
-	req = httptest.NewRequest("GET", "/api/auth/status", nil)
+	// Test GET /api/degradations
+	req = httptest.NewRequest("GET", "/api/degradations", nil)
 	w = httptest.NewRecorder()
-	handleAuthStatus(w, req)
+	handleDegradations(w, req)
 
-	_ = json.Unmarshal(w.Body.Bytes(), &statusRes)
-	if statusRes["initialized"] == false {
-		t.Error("Expected system to be initialized after setup")
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
 	}
-	if statusRes["authenticated"] == true {
-		t.Error("Expected user to be unauthenticated")
+
+	// Test GET /api/alerts
+	req = httptest.NewRequest("GET", "/api/alerts", nil)
+	w = httptest.NewRecorder()
+	handleAlerts(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+
+	// Test GET /api/global-index
+	req = httptest.NewRequest("GET", "/api/global-index", nil)
+	w = httptest.NewRecorder()
+	handleGlobalIndex(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+
+	// Test GET /api/provider-reliability
+	req = httptest.NewRequest("GET", "/api/provider-reliability", nil)
+	w = httptest.NewRecorder()
+	handleProviderReliability(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+
+	// Test GET /api/recommendations
+	req = httptest.NewRequest("GET", "/api/recommendations", nil)
+	w = httptest.NewRecorder()
+	handleRecommendations(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+
+	// Test GET /api/sync-status
+	req = httptest.NewRequest("GET", "/api/sync-status", nil)
+	w = httptest.NewRecorder()
+	handleSyncStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+
+	// Test GET /api/config
+	req = httptest.NewRequest("GET", "/api/config", nil)
+	w = httptest.NewRecorder()
+	handleConfig(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+
+	var configRes map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &configRes); err != nil {
+		t.Fatalf("Failed to unmarshal config response: %v", err)
+	}
+	if _, ok := configRes["blocked_models"]; !ok {
+		t.Error("Expected config to contain blocked_models")
 	}
 }

@@ -1,200 +1,502 @@
 package main
 
 import (
+	"embed"
 	"encoding/json"
+	"fmt"
+	"io/fs"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
-type LoginRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
+//go:embed frontend/dist
+var frontendDist embed.FS
+
+type Config struct {
+	BlockedModels []string `json:"blocked_models"`
 }
 
-func handleSetup(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var count int
-	_ = DB.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
-	if count > 0 {
-		http.Error(w, "First user already registered", http.StatusBadRequest)
-		return
-	}
+var (
+	config   Config
+	configMu sync.RWMutex
+)
 
-	var req LoginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Username == "" || req.Password == "" {
-		http.Error(w, "Invalid inputs", http.StatusBadRequest)
+func loadConfig() {
+	configMu.Lock()
+	defer configMu.Unlock()
+
+	data, err := os.ReadFile("config.json")
+	if err != nil {
+		config = Config{BlockedModels: []string{}}
 		return
 	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		config = Config{BlockedModels: []string{}}
+	}
+}
 
-	hash, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	_, err := DB.Exec("INSERT INTO users (username, password_hash) VALUES (?, ?)", req.Username, string(hash))
+func saveConfig() error {
+	configMu.Lock()
+	defer configMu.Unlock()
+
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile("config.json", data, 0644)
+}
+
+func getBlockedModels() []string {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return config.BlockedModels
+}
+
+func setBlockedModels(models []string) {
+	configMu.Lock()
+	config.BlockedModels = models
+	configMu.Unlock()
+	go func() { _ = saveConfig() }()
+}
+
+func handleConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"blocked_models": getBlockedModels(),
+	})
+}
+
+func handleModels(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	rows, err := DB.Query(`SELECT id, name, provider, vendor, is_reasoning, is_new, is_stale, status, standard_error FROM models ORDER BY name`)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	w.WriteHeader(http.StatusCreated)
-	w.Write([]byte(`{"success":true}`))
-}
-
-func handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req LoginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid inputs", http.StatusBadRequest)
-		return
-	}
-
-	var hash string
-	err := DB.QueryRow("SELECT password_hash FROM users WHERE username = ?", req.Username).Scan(&hash)
-	if err != nil {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)); err != nil {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	// Session token based cookie authentication
-	cookie := &http.Cookie{
-		Name:     "session_token",
-		Value:    req.Username,
-		Expires:  time.Now().Add(24 * time.Hour),
-		Path:     "/",
-		HttpOnly: true,
-	}
-	http.SetCookie(w, cookie)
-	w.Write([]byte(`{"success":true}`))
-}
-
-func handleAuthStatus(w http.ResponseWriter, r *http.Request) {
-	var count int
-	_ = DB.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"initialized":   count > 0,
-		"authenticated": checkAuth(r),
-	})
-}
-
-func checkAuth(r *http.Request) bool {
-	cookie, err := r.Cookie("session_token")
-	if err != nil {
-		return false
-	}
-	return cookie.Value != ""
-}
-
-func handleAdminSettings(w http.ResponseWriter, r *http.Request) {
-	if !checkAuth(r) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	if r.Method == "GET" {
-		rows, err := DB.Query("SELECT key, value FROM settings")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer rows.Close()
-
-		res := make(map[string]string)
-		for rows.Next() {
-			var k, v string
-			_ = rows.Scan(&k, &v)
-			res[k] = v
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(res)
-		return
-	}
-
-	if r.Method == "POST" {
-		var payload map[string]string
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			http.Error(w, "Invalid parameters", http.StatusBadRequest)
-			return
-		}
-		for k, v := range payload {
-			_, _ = DB.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", k, v)
-		}
-		w.Write([]byte(`{"success":true}`))
-	}
-}
-
-func handleCurrent(w http.ResponseWriter, r *http.Request) {
-	var latest string
-	_ = DB.QueryRow("SELECT MAX(timestamp) FROM scores_history").Scan(&latest)
-
-	rows, _ := DB.Query(`
-		select m.id, m.name, m.provider, m.vendor, h.score, h.trend, h.confidence_lower, h.confidence_upper, m.is_reasoning
-		from models m
-		join scores_history h on m.id = h.model_id
-		where h.timestamp = ?`, latest)
 	defer rows.Close()
 
-	type ModelScoreRes struct {
-		ID              string  `json:"id"`
-		Name            string  `json:"name"`
-		Provider        string  `json:"provider"`
-		Vendor          string  `json:"vendor"`
-		Score           int     `json:"score"`
-		Trend           string  `json:"trend"`
-		ConfidenceLower float64 `json:"confidenceLower"`
-		ConfidenceUpper float64 `json:"confidenceUpper"`
-		IsReasoning     bool    `json:"isReasoning"`
+	type Model struct {
+		ID            string  `json:"id"`
+		Name          string  `json:"name"`
+		Provider      string  `json:"provider"`
+		Vendor        string  `json:"vendor"`
+		IsReasoning   bool    `json:"isReasoning"`
+		IsNew         bool    `json:"isNew"`
+		IsStale       bool    `json:"isStale"`
+		Status        string  `json:"status"`
+		StandardError float64 `json:"standardError"`
 	}
 
-	scores := make([]ModelScoreRes, 0)
+	models := []Model{}
 	for rows.Next() {
-		var s ModelScoreRes
-		var reasoning int
-		_ = rows.Scan(&s.ID, &s.Name, &s.Provider, &s.Vendor, &s.Score, &s.Trend, &s.ConfidenceLower, &s.ConfidenceUpper, &reasoning)
-		s.IsReasoning = reasoning == 1
-		scores = append(scores, s)
+		var m Model
+		var isReasoning, isNew, isStale int
+		if err := rows.Scan(&m.ID, &m.Name, &m.Provider, &m.Vendor, &isReasoning, &isNew, &isStale, &m.Status, &m.StandardError); err != nil {
+			continue
+		}
+		m.IsReasoning = isReasoning == 1
+		m.IsNew = isNew == 1
+		m.IsStale = isStale == 1
+		models = append(models, m)
 	}
+	json.NewEncoder(w).Encode(models)
+}
 
-	degRows, _ := DB.Query(`
-		select m.name, m.provider, d.drop_percentage, d.severity, d.detected_at, d.message
-		from degradations d
-		join models m on d.model_id = m.id`)
-	defer degRows.Close()
-
-	type DegRes struct {
-		ModelName      string    `json:"modelName"`
-		Provider       string    `json:"provider"`
-		DropPercentage int       `json:"dropPercentage"`
-		Severity       string    `json:"severity"`
-		DetectedAt     time.Time `json:"detectedAt"`
-		Message        string    `json:"message"`
-	}
-	degs := make([]DegRes, 0)
-	for degRows.Next() {
-		var d DegRes
-		_ = degRows.Scan(&d.ModelName, &d.Provider, &d.DropPercentage, &d.Severity, &d.DetectedAt, &d.Message)
-		degs = append(degs, d)
-	}
-
+func handleScores(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+
+	period := r.URL.Query().Get("period")
+	days := 1
+	switch period {
+	case "7d":
+		days = 7
+	case "14d":
+		days = 14
+	case "30d":
+		days = 30
+	case "24h":
+		days = 1
+	default:
+		days = 0
+	}
+
+	if days == 0 {
+		type LatestScore struct {
+			ModelID         string   `json:"modelId"`
+			ModelName       string   `json:"modelName"`
+			Provider        string   `json:"provider"`
+			Score           int      `json:"score"`
+			Trend           string   `json:"trend"`
+			ConfidenceLower float64  `json:"confidenceLower"`
+			ConfidenceUpper float64  `json:"confidenceUpper"`
+			StandardError   float64  `json:"standardError"`
+			Timestamp       string   `json:"timestamp"`
+			Axes            struct {
+				Correctness       *float64 `json:"correctness"`
+				Complexity        *float64 `json:"complexity"`
+				CodeQuality       *float64 `json:"codeQuality"`
+				Efficiency        *float64 `json:"efficiency"`
+				Stability         *float64 `json:"stability"`
+				EdgeCases         *float64 `json:"edgeCases"`
+				Debugging         *float64 `json:"debugging"`
+				Format            *float64 `json:"format"`
+				Safety            *float64 `json:"safety"`
+				MemoryRetention   *float64 `json:"memoryRetention"`
+				HallucinationRate *float64 `json:"hallucinationRate"`
+				PlanCoherence     *float64 `json:"planCoherence"`
+				ContextWindow     *float64 `json:"contextWindow"`
+			} `json:"axes"`
+		}
+
+		sqlRows, qErr := DB.Query(`
+			SELECT h.model_id, m.name, m.provider, h.score, h.trend, h.confidence_lower, h.confidence_upper, m.standard_error, h.timestamp,
+				h.ax_correctness, h.ax_complexity, h.ax_code_quality, h.ax_efficiency, h.ax_stability,
+				h.ax_edge_cases, h.ax_debugging, h.ax_format, h.ax_safety,
+				h.ax_memory_retention, h.ax_hallucination_rate, h.ax_plan_coherence, h.ax_context_window
+			FROM scores_history h
+			JOIN models m ON h.model_id = m.id
+			WHERE h.timestamp = (SELECT MAX(timestamp) FROM scores_history WHERE model_id = h.model_id)
+			ORDER BY h.score DESC`)
+		if qErr != nil {
+			http.Error(w, qErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer sqlRows.Close()
+
+		results := []LatestScore{}
+		for sqlRows.Next() {
+			var s LatestScore
+			var ts time.Time
+			if err := sqlRows.Scan(&s.ModelID, &s.ModelName, &s.Provider, &s.Score, &s.Trend, &s.ConfidenceLower, &s.ConfidenceUpper, &s.StandardError, &ts,
+				&s.Axes.Correctness, &s.Axes.Complexity, &s.Axes.CodeQuality, &s.Axes.Efficiency, &s.Axes.Stability,
+				&s.Axes.EdgeCases, &s.Axes.Debugging, &s.Axes.Format, &s.Axes.Safety,
+				&s.Axes.MemoryRetention, &s.Axes.HallucinationRate, &s.Axes.PlanCoherence, &s.Axes.ContextWindow); err != nil {
+				continue
+			}
+			s.Timestamp = ts.Format(time.RFC3339)
+			results = append(results, s)
+		}
+		json.NewEncoder(w).Encode(results)
+		return
+	}
+
+	cutoff := time.Now().AddDate(0, 0, -days)
+	sqlRows, err := DB.Query(`
+		SELECT h.model_id, m.name, h.score, h.timestamp, h.suite,
+			h.ax_correctness, h.ax_complexity, h.ax_code_quality, h.ax_efficiency, h.ax_stability,
+			h.ax_edge_cases, h.ax_debugging, h.ax_format, h.ax_safety,
+			h.ax_memory_retention, h.ax_hallucination_rate, h.ax_plan_coherence, h.ax_context_window
+		FROM scores_history h
+		JOIN models m ON h.model_id = m.id
+		WHERE h.timestamp >= ?
+		ORDER BY h.timestamp ASC`, cutoff)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer sqlRows.Close()
+
+	type HistoryPoint struct {
+		ModelID   string              `json:"modelId"`
+		ModelName string              `json:"modelName"`
+		Score     int                 `json:"score"`
+		Timestamp string              `json:"timestamp"`
+		Suite     string              `json:"suite"`
+		Axes      map[string]*float64 `json:"axes"`
+	}
+
+	results := []HistoryPoint{}
+	for sqlRows.Next() {
+		var h HistoryPoint
+		var ts time.Time
+		var axCorr, axComp, axQual, axEff, axStab, axEdge, axDebug, axFmt, axSafe, axMem, axHall, axPlan, axCtx *float64
+		if err := sqlRows.Scan(&h.ModelID, &h.ModelName, &h.Score, &ts, &h.Suite,
+			&axCorr, &axComp, &axQual, &axEff, &axStab, &axEdge, &axDebug, &axFmt, &axSafe, &axMem, &axHall, &axPlan, &axCtx); err != nil {
+			continue
+		}
+		h.Timestamp = ts.Format(time.RFC3339)
+		h.Axes = map[string]*float64{
+			"correctness": axCorr, "complexity": axComp, "codeQuality": axQual,
+			"efficiency": axEff, "stability": axStab, "edgeCases": axEdge,
+			"debugging": axDebug, "format": axFmt, "safety": axSafe,
+			"memoryRetention": axMem, "hallucinationRate": axHall, "planCoherence": axPlan, "contextWindow": axCtx,
+		}
+		results = append(results, h)
+	}
+	json.NewEncoder(w).Encode(results)
+}
+
+func handleDegradations(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	rows, err := DB.Query(`SELECT model_id, model_name, provider, current_score, baseline_score, drop_percentage, z_score, severity, detected_at, message, type FROM degradations ORDER BY drop_percentage DESC`)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	type Degradation struct {
+		ModelID        string `json:"modelId"`
+		ModelName      string `json:"modelName"`
+		Provider       string `json:"provider"`
+		CurrentScore   int    `json:"currentScore"`
+		BaselineScore  int    `json:"baselineScore"`
+		DropPercentage int    `json:"dropPercentage"`
+		ZScore         string `json:"zScore"`
+		Severity       string `json:"severity"`
+		DetectedAt     string `json:"detectedAt"`
+		Message        string `json:"message"`
+		Type           string `json:"type"`
+	}
+
+	results := []Degradation{}
+	for rows.Next() {
+		var d Degradation
+		var ts time.Time
+		if err := rows.Scan(&d.ModelID, &d.ModelName, &d.Provider, &d.CurrentScore, &d.BaselineScore, &d.DropPercentage, &d.ZScore, &d.Severity, &ts, &d.Message, &d.Type); err != nil {
+			continue
+		}
+		d.DetectedAt = ts.Format(time.RFC3339)
+		results = append(results, d)
+	}
+	json.NewEncoder(w).Encode(results)
+}
+
+func handleAlerts(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	rows, err := DB.Query(`SELECT model_name, provider, issue, severity, detected_at FROM alerts ORDER BY detected_at DESC`)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	type Alert struct {
+		ModelName  string `json:"modelName"`
+		Provider   string `json:"provider"`
+		Issue      string `json:"issue"`
+		Severity   string `json:"severity"`
+		DetectedAt string `json:"detectedAt"`
+	}
+
+	results := []Alert{}
+	for rows.Next() {
+		var a Alert
+		var ts time.Time
+		if err := rows.Scan(&a.ModelName, &a.Provider, &a.Issue, &a.Severity, &ts); err != nil {
+			continue
+		}
+		a.DetectedAt = ts.Format(time.RFC3339)
+		results = append(results, a)
+	}
+	json.NewEncoder(w).Encode(results)
+}
+
+func handleGlobalIndex(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	rows, err := DB.Query(`SELECT timestamp, global_score, models_count, trend, performing_well, total_models FROM global_index ORDER BY timestamp DESC LIMIT 100`)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	type GlobalIndex struct {
+		Timestamp      string `json:"timestamp"`
+		GlobalScore    int    `json:"globalScore"`
+		ModelsCount    int    `json:"modelsCount"`
+		Trend          string `json:"trend"`
+		PerformingWell int    `json:"performingWell"`
+		TotalModels    int    `json:"totalModels"`
+	}
+
+	results := []GlobalIndex{}
+	for rows.Next() {
+		var g GlobalIndex
+		var ts time.Time
+		if err := rows.Scan(&ts, &g.GlobalScore, &g.ModelsCount, &g.Trend, &g.PerformingWell, &g.TotalModels); err != nil {
+			continue
+		}
+		g.Timestamp = ts.Format(time.RFC3339)
+		results = append(results, g)
+	}
+	json.NewEncoder(w).Encode(results)
+}
+
+func handleProviderReliability(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	rows, err := DB.Query(`SELECT provider, trust_score, total_incidents, incidents_per_month, avg_recovery_hours, last_incident, trend, active_models, top_performers, is_available FROM provider_reliability ORDER BY trust_score DESC`)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	type ProviderReliability struct {
+		Provider          string `json:"provider"`
+		TrustScore        int    `json:"trustScore"`
+		TotalIncidents    int    `json:"totalIncidents"`
+		IncidentsPerMonth int    `json:"incidentsPerMonth"`
+		AvgRecoveryHours  string `json:"avgRecoveryHours"`
+		LastIncident      string `json:"lastIncident"`
+		Trend             string `json:"trend"`
+		ActiveModels      int    `json:"activeModels"`
+		TopPerformers     int    `json:"topPerformers"`
+		IsAvailable       bool   `json:"isAvailable"`
+	}
+
+	results := []ProviderReliability{}
+	for rows.Next() {
+		var p ProviderReliability
+		var ts time.Time
+		var isAvail int
+		if err := rows.Scan(&p.Provider, &p.TrustScore, &p.TotalIncidents, &p.IncidentsPerMonth, &p.AvgRecoveryHours, &ts, &p.Trend, &p.ActiveModels, &p.TopPerformers, &isAvail); err != nil {
+			continue
+		}
+		p.LastIncident = ts.Format(time.RFC3339)
+		p.IsAvailable = isAvail == 1
+		results = append(results, p)
+	}
+	json.NewEncoder(w).Encode(results)
+}
+
+func handleRecommendations(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	rows, err := DB.Query(`SELECT type, model_id, model_name, vendor, score, reason, evidence, extra_data FROM recommendations`)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	type Recommendation struct {
+		Type      string `json:"type"`
+		ModelID   string `json:"modelId"`
+		ModelName string `json:"modelName"`
+		Vendor    string `json:"vendor"`
+		Score     int    `json:"score"`
+		Reason    string `json:"reason"`
+		Evidence  string `json:"evidence"`
+		ExtraData string `json:"extraData,omitempty"`
+	}
+
+	results := []Recommendation{}
+	for rows.Next() {
+		var rec Recommendation
+		if err := rows.Scan(&rec.Type, &rec.ModelID, &rec.ModelName, &rec.Vendor, &rec.Score, &rec.Reason, &rec.Evidence, &rec.ExtraData); err != nil {
+			continue
+		}
+		results = append(results, rec)
+	}
+	json.NewEncoder(w).Encode(results)
+}
+
+func handleTransparency(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	type Summary struct {
+		LastUpdate    string `json:"lastUpdate"`
+		TotalTests    int    `json:"totalTests"`
+		PassedTests   int    `json:"passedTests"`
+		Coverage      int    `json:"coverage"`
+		Confidence    int    `json:"confidence"`
+		DataPoints24h int    `json:"dataPoints24h"`
+		NextTest      string `json:"nextTest"`
+		ModelsFresh   int    `json:"modelsFresh"`
+		ModelsStale   int    `json:"modelsStale"`
+		ModelsOffline int    `json:"modelsOffline"`
+	}
+
+	type ModelFreshness struct {
+		Model      string `json:"model"`
+		LastUpdate string `json:"lastUpdate"`
+		MinutesAgo int    `json:"minutesAgo"`
+		Status     string `json:"status"`
+	}
+
+	var s Summary
+	var lastUpdate, nextTest time.Time
+	err := DB.QueryRow(`SELECT last_update, total_tests, passed_tests, coverage, confidence, data_points_24h, next_test, models_fresh, models_stale, models_offline FROM transparency WHERE id = 1`).
+		Scan(&lastUpdate, &s.TotalTests, &s.PassedTests, &s.Coverage, &s.Confidence, &s.DataPoints24h, &nextTest, &s.ModelsFresh, &s.ModelsStale, &s.ModelsOffline)
+	if err == nil {
+		s.LastUpdate = lastUpdate.Format(time.RFC3339)
+		s.NextTest = nextTest.Format(time.RFC3339)
+	}
+
+	rows, err := DB.Query(`SELECT model_name, last_update, minutes_ago, status FROM model_freshness`)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"summary":        s,
+			"modelFreshness": []ModelFreshness{},
+		})
+		return
+	}
+	defer rows.Close()
+
+	freshness := []ModelFreshness{}
+	for rows.Next() {
+		var mf ModelFreshness
+		var ts time.Time
+		if err := rows.Scan(&mf.Model, &ts, &mf.MinutesAgo, &mf.Status); err != nil {
+			continue
+		}
+		mf.LastUpdate = ts.Format(time.RFC3339)
+		freshness = append(freshness, mf)
+	}
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"scores":       scores,
-		"degradations": degs,
+		"summary":        s,
+		"modelFreshness": freshness,
 	})
 }
 
-func handleHistory(w http.ResponseWriter, r *http.Request) {
+func handleSyncStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	lastSync := getLastSyncTime()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"lastSync": lastSync.Format(time.RFC3339),
+		"nextSync": getNextSyncTime().Format(time.RFC3339),
+	})
+}
+
+func getNextSyncTime() time.Time {
+	now := time.Now()
+	nextMinute := ((now.Minute() / 10) + 1) * 10
+	if nextMinute >= 60 {
+		return time.Date(now.Year(), now.Month(), now.Day(), now.Hour()+1, 0, 0, 0, now.Location())
+	}
+	return time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), nextMinute, 0, 0, now.Location())
+}
+
+func handleManualSync(w http.ResponseWriter, r *http.Request) {
+	err := FetchAndSync()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+func handleModelHistory(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	modelID := r.URL.Query().Get("id")
+	if modelID == "" {
+		http.Error(w, "Missing model id", http.StatusBadRequest)
+		return
+	}
+
 	daysStr := r.URL.Query().Get("days")
 	days, err := strconv.Atoi(daysStr)
 	if err != nil || days <= 0 {
@@ -203,59 +505,100 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 
 	cutoff := time.Now().AddDate(0, 0, -days)
 	rows, err := DB.Query(`
-		select model_id, score, timestamp
-		from scores_history
-		where timestamp >= ?
-		order by timestamp asc`, cutoff)
+		SELECT timestamp, score, stupid_score, suite, confidence_lower, confidence_upper,
+			ax_correctness, ax_complexity, ax_code_quality, ax_efficiency, ax_stability,
+			ax_edge_cases, ax_debugging, ax_format, ax_safety,
+			ax_memory_retention, ax_hallucination_rate, ax_plan_coherence, ax_context_window
+		FROM scores_history
+		WHERE model_id = ? AND timestamp >= ?
+		ORDER BY timestamp ASC`, modelID, cutoff)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
 
-	type HistPoint struct {
-		Score     int       `json:"score"`
-		Timestamp time.Time `json:"timestamp"`
+	type HistoryPoint struct {
+		Timestamp       string              `json:"timestamp"`
+		Score           int                 `json:"score"`
+		StupidScore     float64             `json:"stupidScore"`
+		Suite           string              `json:"suite"`
+		ConfidenceLower float64             `json:"confidenceLower"`
+		ConfidenceUpper float64             `json:"confidenceUpper"`
+		Axes            map[string]*float64 `json:"axes"`
 	}
 
-	history := make(map[string][]HistPoint)
+	results := []HistoryPoint{}
 	for rows.Next() {
-		var mid string
-		var pt HistPoint
-		_ = rows.Scan(&mid, &pt.Score, &pt.Timestamp)
-		history[mid] = append(history[mid], pt)
+		var h HistoryPoint
+		var ts time.Time
+		var axCorr, axComp, axQual, axEff, axStab, axEdge, axDebug, axFmt, axSafe, axMem, axHall, axPlan, axCtx *float64
+		if err := rows.Scan(&ts, &h.Score, &h.StupidScore, &h.Suite, &h.ConfidenceLower, &h.ConfidenceUpper,
+			&axCorr, &axComp, &axQual, &axEff, &axStab, &axEdge, &axDebug, &axFmt, &axSafe, &axMem, &axHall, &axPlan, &axCtx); err != nil {
+			continue
+		}
+		h.Timestamp = ts.Format(time.RFC3339)
+		h.Axes = map[string]*float64{
+			"correctness": axCorr, "complexity": axComp, "codeQuality": axQual,
+			"efficiency": axEff, "stability": axStab, "edgeCases": axEdge,
+			"debugging": axDebug, "format": axFmt, "safety": axSafe,
+			"memoryRetention": axMem, "hallucinationRate": axHall, "planCoherence": axPlan, "contextWindow": axCtx,
+		}
+		results = append(results, h)
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(history)
-}
-
-func handleManualSync(w http.ResponseWriter, r *http.Request) {
-	if !checkAuth(r) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-	err := FetchAndSync()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Write([]byte(`{"success":true}`))
+	json.NewEncoder(w).Encode(results)
 }
 
 func SetupRoutes() {
-	http.HandleFunc("/api/auth/setup", handleSetup)
-	http.HandleFunc("/api/auth/login", handleLogin)
-	http.HandleFunc("/api/auth/status", handleAuthStatus)
-	http.HandleFunc("/api/admin/settings", handleAdminSettings)
-	http.HandleFunc("/api/admin/sync-now", handleManualSync)
-	http.HandleFunc("/api/dashboard/current", handleCurrent)
-	http.HandleFunc("/api/dashboard/history", handleHistory)
+	http.HandleFunc("/api/config", handleConfig)
+	http.HandleFunc("/api/sync-now", handleManualSync)
+
+	http.HandleFunc("/api/models", handleModels)
+	http.HandleFunc("/api/scores", handleScores)
+	http.HandleFunc("/api/model/history", handleModelHistory)
+	http.HandleFunc("/api/degradations", handleDegradations)
+	http.HandleFunc("/api/alerts", handleAlerts)
+	http.HandleFunc("/api/global-index", handleGlobalIndex)
+	http.HandleFunc("/api/provider-reliability", handleProviderReliability)
+	http.HandleFunc("/api/recommendations", handleRecommendations)
+	http.HandleFunc("/api/transparency", handleTransparency)
+	http.HandleFunc("/api/sync-status", handleSyncStatus)
 }
 
 func main() {
-	_ = InitDB("./aistupid.db")
-	StartSyncWorker()
+	loadConfig()
+	if err := InitDB("./aistupid.db"); err != nil {
+		fmt.Println("InitDB error:", err)
+		return
+	}
+
+	if err := FetchAndSync(); err != nil {
+		fmt.Println("Initial sync error:", err)
+	}
+	go StartSyncWorkerLoop()
 	SetupRoutes()
-	_ = http.ListenAndServe("127.0.0.1:3223", nil)
+
+	subDist, err := fs.Sub(frontendDist, "frontend/dist")
+	if err != nil {
+		fmt.Println("Frontend embed error:", err)
+		return
+	}
+	fileServer := http.FileServer(http.FS(subDist))
+	http.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api") {
+			http.NotFound(w, r)
+			return
+		}
+		f, err := subDist.Open(strings.TrimPrefix(r.URL.Path, "/"))
+		if err != nil {
+			r.URL.Path = "/"
+		} else {
+			f.Close()
+		}
+		fileServer.ServeHTTP(w, r)
+	}))
+
+	if err := http.ListenAndServe("127.0.0.1:3223", nil); err != nil {
+		fmt.Println("Server error:", err)
+	}
 }
