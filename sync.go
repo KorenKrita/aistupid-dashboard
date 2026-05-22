@@ -13,6 +13,7 @@ var (
 	lastSyncTime time.Time
 	lastSyncMu   sync.RWMutex
 	syncMu       sync.Mutex
+	apiBaseURL   = "https://aistupidlevel.info"
 )
 
 func getLastSyncTime() time.Time {
@@ -179,7 +180,7 @@ type TransparencyResponse struct {
 
 func fetchJSON(path string, target interface{}) error {
 	client := &http.Client{Timeout: 30 * time.Second}
-	req, err := http.NewRequest("GET", "https://aistupidlevel.info"+path, nil)
+	req, err := http.NewRequest("GET", apiBaseURL+path, nil)
 	if err != nil {
 		return err
 	}

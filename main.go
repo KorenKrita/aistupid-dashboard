@@ -472,7 +472,10 @@ func handleSyncStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func getNextSyncTime() time.Time {
-	now := time.Now()
+	return getNextSyncTimeAt(time.Now())
+}
+
+func getNextSyncTimeAt(now time.Time) time.Time {
 	nextMinute := ((now.Minute() / 10) + 1) * 10
 	if nextMinute >= 60 {
 		return time.Date(now.Year(), now.Month(), now.Day(), now.Hour()+1, 0, 0, 0, now.Location())
