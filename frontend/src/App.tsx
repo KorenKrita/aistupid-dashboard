@@ -143,10 +143,10 @@ const PERIOD_OPTIONS = [
 ];
 
 const MODEL_COLORS = [
-  '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6',
-  '#06b6d4', '#ec4899', '#84cc16', '#f97316', '#6366f1',
-  '#14b8a6', '#a855f7', '#22c55e', '#e11d48', '#0ea5e9',
-  '#d946ef', '#eab308', '#64748b', '#fb7185', '#2dd4bf'
+  '#2563eb', '#dc2626', '#16a34a', '#ca8a04', '#9333ea',
+  '#0891b2', '#e11d48', '#65a30d', '#ea580c', '#4f46e5',
+  '#0d9488', '#be185d', '#a16207', '#0284c7', '#7c3aed',
+  '#059669', '#b91c1c', '#c026d3', '#475569', '#15803d'
 ];
 
 export default function App() {
@@ -358,14 +358,15 @@ export default function App() {
     return MODEL_COLORS[idx % MODEL_COLORS.length];
   };
 
-  const getHistoryChartOptions = () => {
+  const historyChartOptions = useMemo(() => {
     const isDark = theme === 'dark';
     const modelIds = [...new Set(filteredHistory.map(h => h.modelId))];
 
     const series = modelIds.map(modelId => {
       const modelData = filteredHistory.filter(h => h.modelId === modelId);
       const model = models.find(m => m.id === modelId);
-      const color = getModelColor(modelId);
+      const idx = models.findIndex(m => m.id === modelId);
+      const color = idx < 0 ? MODEL_COLORS[0] : MODEL_COLORS[idx % MODEL_COLORS.length];
 
       return {
         name: model?.name || modelId,
@@ -426,7 +427,7 @@ export default function App() {
       },
       series
     };
-  };
+  }, [filteredHistory, models, theme]);
 
   const getRadarChartOptions = (axes: Record<string, number | null>) => {
     const isDark = theme === 'dark';
@@ -462,7 +463,7 @@ export default function App() {
     };
   };
 
-  const getGlobalIndexChartOptions = () => {
+  const globalIndexChartOptions = useMemo(() => {
     const isDark = theme === 'dark';
     const sorted = [...globalIndex].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
@@ -501,11 +502,11 @@ export default function App() {
         data: sorted.map(g => [new Date(g.timestamp).getTime(), g.globalScore])
       }]
     };
-  };
+  }, [globalIndex, theme]);
 
   const selectedModelData = selectedModel ? filteredScores.find(s => s.modelId === selectedModel) : null;
 
-  const getLatestBarChartOptions = () => {
+  const latestBarChartOptions = useMemo(() => {
     const isDark = theme === 'dark';
     const sortedScores = [...filteredScores].sort((a, b) => b.score - a.score);
 
@@ -552,7 +553,7 @@ export default function App() {
         barWidth: '60%'
       }]
     };
-  };
+  }, [filteredScores, theme]);
 
   const getCompareRadarOptions = () => {
     const isDark = theme === 'dark';
@@ -884,7 +885,7 @@ export default function App() {
                 <div className="h-72">
                   {period === 'latest' ? (
                     filteredScores.length > 0 ? (
-                      <ReactECharts option={getLatestBarChartOptions()} style={{ height: '100%', width: '100%' }} />
+                      <ReactECharts option={latestBarChartOptions} style={{ height: '100%', width: '100%' }} />
                     ) : (
                       <div className="flex items-center justify-center h-full text-textMuted text-sm">
                         <Activity className="animate-spin mr-2" size={16} /> 加载中...
@@ -899,7 +900,7 @@ export default function App() {
                       请选择要展示的模型
                     </div>
                   ) : filteredHistory.length > 0 ? (
-                    <ReactECharts key={`${period}-${visibleModels.join(',')}`} option={getHistoryChartOptions()} style={{ height: '100%', width: '100%' }} notMerge={true} />
+                    <ReactECharts key={`${period}-${visibleModels.join(',')}`} option={historyChartOptions} style={{ height: '100%', width: '100%' }} notMerge={true} />
                   ) : (
                     <div className="flex items-center justify-center h-full text-textMuted text-sm">
                       所选模型暂无历史数据
@@ -1034,7 +1035,7 @@ export default function App() {
                 <h3 className="font-bold text-sm mb-3">全局指数趋势</h3>
                 <div className="h-32">
                   {globalIndex.length > 0 ? (
-                    <ReactECharts option={getGlobalIndexChartOptions()} style={{ height: '100%', width: '100%' }} />
+                    <ReactECharts option={globalIndexChartOptions} style={{ height: '100%', width: '100%' }} />
                   ) : (
                     <div className="flex items-center justify-center h-full text-textMuted text-xs">暂无数据</div>
                   )}
