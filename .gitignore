@@ -9,6 +9,7 @@ server
 
 # Screenshots
 *.png
+!frontend/public/favicon.png
 
 # macOS
 .DS_Store
