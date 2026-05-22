@@ -26,11 +26,18 @@ func migrateScoresHistory() error {
 	}
 
 	fmt.Println("Migrating scores_history: adding suite to PRIMARY KEY...")
-	_, err = DB.Exec(`ALTER TABLE scores_history RENAME TO scores_history_old`)
+
+	tx, err := DB.Begin()
+	if err != nil {
+		return fmt.Errorf("migration begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`ALTER TABLE scores_history RENAME TO scores_history_old`)
 	if err != nil {
 		return fmt.Errorf("migration rename: %w", err)
 	}
-	_, err = DB.Exec(`CREATE TABLE scores_history (
+	_, err = tx.Exec(`CREATE TABLE scores_history (
 		model_id TEXT NOT NULL,
 		timestamp DATETIME NOT NULL,
 		suite TEXT NOT NULL DEFAULT '',
@@ -56,10 +63,9 @@ func migrateScoresHistory() error {
 		FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE CASCADE
 	)`)
 	if err != nil {
-		DB.Exec(`ALTER TABLE scores_history_old RENAME TO scores_history`)
 		return fmt.Errorf("migration create: %w", err)
 	}
-	_, err = DB.Exec(`INSERT OR IGNORE INTO scores_history
+	_, err = tx.Exec(`INSERT OR IGNORE INTO scores_history
 		(model_id, timestamp, suite, score, stupid_score, trend, confidence_lower, confidence_upper,
 		 ax_correctness, ax_complexity, ax_code_quality, ax_efficiency, ax_stability,
 		 ax_edge_cases, ax_debugging, ax_format, ax_safety,
@@ -72,7 +78,14 @@ func migrateScoresHistory() error {
 	if err != nil {
 		return fmt.Errorf("migration copy: %w", err)
 	}
-	_, _ = DB.Exec(`DROP TABLE scores_history_old`)
+	_, err = tx.Exec(`DROP TABLE scores_history_old`)
+	if err != nil {
+		return fmt.Errorf("migration drop old: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("migration commit: %w", err)
+	}
 	fmt.Println("Migration complete.")
 	return nil
 }

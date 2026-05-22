@@ -224,11 +224,8 @@ export default function App() {
   }, []);
 
   const fetchAll = useCallback(async (signal?: AbortSignal) => {
-    if (period !== 'latest') {
-      setIsLoadingHistory(true);
-    }
     try {
-      const requests = [
+      const responses = await Promise.all([
         fetch('/api/models', { signal }),
         fetch('/api/scores?period=latest', { signal }),
         fetch('/api/degradations', { signal }),
@@ -238,23 +235,11 @@ export default function App() {
         fetch('/api/recommendations', { signal }),
         fetch('/api/sync-status', { signal }),
         fetch('/api/config', { signal })
-      ];
-      if (period !== 'latest') {
-        requests.push(fetch(`/api/scores?period=${period}`, { signal }));
-      }
-
-      const responses = await Promise.all(requests);
+      ]);
       const [modelsRes, latestScoresRes, degradRes, alertsRes, globalRes, provRes, recRes, syncRes, configRes] = responses;
 
       setModels(await modelsRes.json());
       setScores(await latestScoresRes.json());
-
-      if (period !== 'latest' && responses[9]) {
-        setHistory(await responses[9].json());
-      } else {
-        setHistory([]);
-      }
-
       setDegradations(await degradRes.json());
       setAlerts(await alertsRes.json());
       setGlobalIndex(await globalRes.json());
@@ -267,6 +252,21 @@ export default function App() {
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
       console.error('Fetch error:', e);
+    }
+  }, []);
+
+  const fetchHistory = useCallback(async (signal?: AbortSignal) => {
+    if (period === 'latest') {
+      setHistory([]);
+      return;
+    }
+    setIsLoadingHistory(true);
+    try {
+      const res = await fetch(`/api/scores?period=${period}`, { signal });
+      setHistory(await res.json());
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') return;
+      console.error('Fetch history error:', e);
     } finally {
       setIsLoadingHistory(false);
     }
@@ -288,6 +288,12 @@ export default function App() {
     };
   }, [fetchAll]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchHistory(controller.signal);
+    return () => controller.abort();
+  }, [fetchHistory]);
+
   const [visibleModelsInitialized, setVisibleModelsInitialized] = useState(false);
 
   useEffect(() => {
@@ -302,6 +308,7 @@ export default function App() {
     try {
       await fetch('/api/sync-now', { method: 'POST' });
       await fetchAll();
+      await fetchHistory();
     } catch { alert('同步失败'); }
     setIsSyncing(false);
   };
@@ -347,6 +354,7 @@ export default function App() {
 
   const getModelColor = (modelId: string) => {
     const idx = models.findIndex(m => m.id === modelId);
+    if (idx < 0) return MODEL_COLORS[0];
     return MODEL_COLORS[idx % MODEL_COLORS.length];
   };
 
@@ -592,12 +600,22 @@ export default function App() {
     }
   };
 
+  const modelHistoryAbortRef = useRef<AbortController | null>(null);
+
   const fetchModelHistory = async (modelId: string) => {
+    if (modelHistoryAbortRef.current) {
+      modelHistoryAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    modelHistoryAbortRef.current = controller;
     try {
-      const res = await fetch(`/api/model/history?id=${modelId}&days=30`);
+      const res = await fetch(`/api/model/history?id=${modelId}&days=30`, { signal: controller.signal });
       const data = await res.json();
-      setModelHistory(data);
+      if (!controller.signal.aborted) {
+        setModelHistory(data);
+      }
     } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') return;
       console.error('Fetch model history error:', e);
       setModelHistory([]);
     }
@@ -685,7 +703,12 @@ export default function App() {
     };
   };
 
-  const currentGlobal = globalIndex[0];
+  const currentGlobal = useMemo(() => {
+    if (globalIndex.length === 0) return null;
+    return globalIndex.reduce((latest, g) =>
+      new Date(g.timestamp).getTime() > new Date(latest.timestamp).getTime() ? g : latest
+    );
+  }, [globalIndex]);
   const bestForCode = recommendations.find(r => r.type === 'best_for_code');
   const mostReliable = recommendations.find(r => r.type === 'most_reliable');
   const fastestResponse = recommendations.find(r => r.type === 'fastest_response');
@@ -948,7 +971,9 @@ export default function App() {
                     <ReactECharts option={getRadarChartOptions(selectedModelData.axes)} style={{ height: '100%', width: '100%' }} />
                   </div>
                   <div className="mt-4 grid grid-cols-3 gap-2 text-center">
-                    {Object.entries(selectedModelData.axes).filter(([_, v]) => v !== null).slice(0, 6).map(([key, value]) => (
+                    {Object.entries(selectedModelData.axes)
+                      .filter(([key, v]) => v !== null && !['memoryRetention', 'hallucinationRate', 'planCoherence', 'contextWindow'].includes(key))
+                      .slice(0, 6).map(([key, value]) => (
                       <div key={key} className="p-2 rounded-lg bg-bgApp">
                         <div className="text-xs font-bold">{((value as number) * 100).toFixed(0)}%</div>
                         <div className="text-[9px] text-textMuted">{AXES_ZH[key] || key}</div>
@@ -1084,9 +1109,10 @@ export default function App() {
                     })}
                   </div>
                   <div className="h-64">
-                    {modelHistory.length > 0 ? (
-                      getModelDetailChartOptions() && <ReactECharts key={`${detailModel}-${detailAxis}`} option={getModelDetailChartOptions()!} style={{ height: '100%', width: '100%' }} notMerge={true} />
-                    ) : (
+                    {modelHistory.length > 0 ? (() => {
+                      const chartOpts = getModelDetailChartOptions();
+                      return chartOpts ? <ReactECharts key={`${detailModel}-${detailAxis}`} option={chartOpts} style={{ height: '100%', width: '100%' }} notMerge={true} /> : null;
+                    })() : (
                       <div className="flex items-center justify-center h-full text-textMuted text-sm">
                         <Activity className="animate-spin mr-2" size={16} /> 加载历史数据...
                       </div>
@@ -1139,7 +1165,10 @@ export default function App() {
                 </div>
                 <div className={`${compareModels.length < 3 ? 'grid grid-cols-1 lg:grid-cols-3 gap-4' : 'flex justify-center'}`}>
                   <div className={`h-80 ${compareModels.length < 3 ? 'lg:col-span-2' : 'w-full max-w-2xl'}`}>
-                    {getCompareRadarOptions() && <ReactECharts option={getCompareRadarOptions()!} style={{ height: '100%', width: '100%' }} />}
+                    {(() => {
+                      const opts = getCompareRadarOptions();
+                      return opts ? <ReactECharts option={opts} style={{ height: '100%', width: '100%' }} /> : null;
+                    })()}
                   </div>
                   {compareModels.length < 3 && (
                     <div className="p-3 rounded-lg bg-bgApp border border-border/50 max-h-80 overflow-y-auto scrollbar-stable">
@@ -1167,7 +1196,7 @@ export default function App() {
                       <div key={id} className="p-3 rounded-lg bg-bgApp border-l-4" style={{ borderLeftColor: MODEL_COLORS[idx] }}>
                         <div className="font-bold text-sm mb-2 text-center">{s.modelName}</div>
                         <div className="grid grid-cols-3 gap-1">
-                          {Object.entries(s.axes).filter(([_, v]) => v !== null && v !== 0).slice(0, 9).map(([key, value]) => (
+                          {Object.entries(s.axes).filter(([key, v]) => v !== null && v !== 0 && !['memoryRetention', 'hallucinationRate', 'planCoherence', 'contextWindow'].includes(key)).slice(0, 9).map(([key, value]) => (
                             <div key={key} className="text-center">
                               <div className="text-[10px] font-bold">{((value as number) * 100).toFixed(0)}%</div>
                               <div className="text-[8px] text-textMuted">{AXES_ZH[key] || key}</div>
@@ -1242,7 +1271,7 @@ export default function App() {
                         <ReactECharts option={getRadarChartOptions(s.axes)} style={{ height: '100%', width: '100%' }} />
                       </div>
                       <div className="mt-3 grid grid-cols-3 gap-1.5">
-                        {Object.entries(s.axes).filter(([_, v]) => v !== null && v !== 0).slice(0, 9).map(([key, value]) => (
+                        {Object.entries(s.axes).filter(([key, v]) => v !== null && v !== 0 && !['memoryRetention', 'hallucinationRate', 'planCoherence', 'contextWindow'].includes(key)).slice(0, 9).map(([key, value]) => (
                           <div key={key} className={`text-center p-1.5 rounded ${sortBy === key ? 'bg-amber-100 dark:bg-amber-900/30 ring-1 ring-amber-500' : 'bg-bgApp'}`}>
                             <div className={`text-[10px] font-bold ${sortBy === key ? 'text-amber-600 dark:text-amber-400' : ''}`}>{((value as number) * 100).toFixed(0)}%</div>
                             <div className={`text-[8px] truncate ${sortBy === key ? 'text-amber-600 dark:text-amber-400' : 'text-textMuted'}`}>{AXES_ZH[key] || key}</div>

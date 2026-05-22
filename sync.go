@@ -223,19 +223,29 @@ func fetchAndSyncLocked() error {
 	}
 
 	var alertsResp AlertsResponse
-	fetchJSON("/dashboard/alerts", &alertsResp)
+	if err := fetchJSON("/dashboard/alerts", &alertsResp); err != nil {
+		fmt.Printf("Warning: fetch alerts failed: %v\n", err)
+	}
 
 	var globalIdx GlobalIndexResponse
-	fetchJSON("/dashboard/global-index", &globalIdx)
+	if err := fetchJSON("/dashboard/global-index", &globalIdx); err != nil {
+		fmt.Printf("Warning: fetch global-index failed: %v\n", err)
+	}
 
 	var provRel ProviderReliabilityResponse
-	fetchJSON("/analytics/provider-reliability", &provRel)
+	if err := fetchJSON("/analytics/provider-reliability", &provRel); err != nil {
+		fmt.Printf("Warning: fetch provider-reliability failed: %v\n", err)
+	}
 
 	var recs RecommendationsResponse
-	fetchJSON("/analytics/recommendations", &recs)
+	if err := fetchJSON("/analytics/recommendations", &recs); err != nil {
+		fmt.Printf("Warning: fetch recommendations failed: %v\n", err)
+	}
 
 	var trans TransparencyResponse
-	fetchJSON("/analytics/transparency", &trans)
+	if err := fetchJSON("/analytics/transparency", &trans); err != nil {
+		fmt.Printf("Warning: fetch transparency failed: %v\n", err)
+	}
 
 	tx, err := DB.Begin()
 	if err != nil {
@@ -306,7 +316,7 @@ func fetchAndSyncLocked() error {
 					axes["memoryRetention"], axes["hallucinationRate"], axes["planCoherence"], axes["contextWindow"])
 			}
 			if err != nil {
-				fmt.Printf("Warning: insert history %s@%s: %v\n", modelID, pt.Timestamp, err)
+				return fmt.Errorf("insert history %s@%s: %w", modelID, pt.Timestamp, err)
 			}
 		}
 	}
@@ -318,15 +328,23 @@ func fetchAndSyncLocked() error {
 		}
 		var axes map[string]float64
 		if points, ok := cached.Data.HistoryMap[m.ID]; ok && len(points) > 0 {
-			axes = points[len(points)-1].Axes
+			latest := points[0]
+			for _, pt := range points[1:] {
+				ptTime, _ := time.Parse(time.RFC3339, pt.Timestamp)
+				latestTime, _ := time.Parse(time.RFC3339, latest.Timestamp)
+				if ptTime.After(latestTime) {
+					latest = pt
+				}
+			}
+			axes = latest.Axes
 		}
+
+		_, _ = tx.Exec(`DELETE FROM scores_history WHERE model_id = ? AND suite = 'current'`, m.ID)
+
 		if axes == nil {
 			_, err = tx.Exec(`INSERT INTO scores_history
 				(model_id, timestamp, suite, score, stupid_score, trend, confidence_lower, confidence_upper)
-				VALUES (?, ?, 'current', ?, ?, ?, ?, ?)
-				ON CONFLICT(model_id, timestamp, suite) DO UPDATE SET
-				score=excluded.score, stupid_score=excluded.stupid_score, trend=excluded.trend,
-				confidence_lower=excluded.confidence_lower, confidence_upper=excluded.confidence_upper`,
+				VALUES (?, ?, 'current', ?, ?, ?, ?, ?)`,
 				m.ID, ts, m.CurrentScore, float64(m.CurrentScore), m.Trend, m.ConfidenceLower, m.ConfidenceUpper)
 		} else {
 			_, err = tx.Exec(`INSERT INTO scores_history
@@ -334,16 +352,7 @@ func fetchAndSyncLocked() error {
 				ax_correctness, ax_complexity, ax_code_quality, ax_efficiency, ax_stability,
 				ax_edge_cases, ax_debugging, ax_format, ax_safety,
 				ax_memory_retention, ax_hallucination_rate, ax_plan_coherence, ax_context_window)
-				VALUES (?, ?, 'current', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-				ON CONFLICT(model_id, timestamp, suite) DO UPDATE SET
-				score=excluded.score, stupid_score=excluded.stupid_score, trend=excluded.trend,
-				confidence_lower=excluded.confidence_lower, confidence_upper=excluded.confidence_upper,
-				ax_correctness=excluded.ax_correctness, ax_complexity=excluded.ax_complexity,
-				ax_code_quality=excluded.ax_code_quality, ax_efficiency=excluded.ax_efficiency,
-				ax_stability=excluded.ax_stability, ax_edge_cases=excluded.ax_edge_cases,
-				ax_debugging=excluded.ax_debugging, ax_format=excluded.ax_format, ax_safety=excluded.ax_safety,
-				ax_memory_retention=excluded.ax_memory_retention, ax_hallucination_rate=excluded.ax_hallucination_rate,
-				ax_plan_coherence=excluded.ax_plan_coherence, ax_context_window=excluded.ax_context_window`,
+				VALUES (?, ?, 'current', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				m.ID, ts, m.CurrentScore, float64(m.CurrentScore), m.Trend, m.ConfidenceLower, m.ConfidenceUpper,
 				axes["correctness"], axes["complexity"], axes["codeQuality"], axes["efficiency"], axes["stability"],
 				axes["edgeCases"], axes["debugging"], axes["format"], axes["safety"],
@@ -388,7 +397,6 @@ func fetchAndSyncLocked() error {
 
 	rows, err := tx.Query(`SELECT model_id, type, message FROM degradations`)
 	if err == nil {
-		defer rows.Close()
 		var toDelete []struct{ modelID, typ, msg string }
 		for rows.Next() {
 			var modelID, typ, msg string

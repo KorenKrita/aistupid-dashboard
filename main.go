@@ -62,11 +62,14 @@ func getBlockedModels() []string {
 
 func setBlockedModels(models []string) error {
 	configMu.Lock()
+	defer configMu.Unlock()
+	old := config.BlockedModels
 	config.BlockedModels = models
-	snapshot := make([]string, len(models))
-	copy(snapshot, models)
-	configMu.Unlock()
-	return saveConfigData(snapshot)
+	if err := saveConfigData(models); err != nil {
+		config.BlockedModels = old
+		return err
+	}
+	return nil
 }
 
 func handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -618,6 +621,17 @@ func main() {
 
 	if err := FetchAndSync(); err != nil {
 		fmt.Println("Initial sync error:", err)
+		go func() {
+			for _, delay := range []time.Duration{30 * time.Second, 60 * time.Second, 120 * time.Second} {
+				time.Sleep(delay)
+				if err := FetchAndSync(); err != nil {
+					fmt.Printf("Retry sync error (after %v): %v\n", delay, err)
+					continue
+				}
+				fmt.Println("Retry sync succeeded")
+				return
+			}
+		}()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
