@@ -1,3 +1,8 @@
+// sync.go - 数据同步模块
+// 负责从上游 API (aistupidlevel.info) 拉取模型评分、退化、警报、
+// 全局指数、提供商可靠性、推荐和透明度数据，并写入 SQLite 数据库。
+// 支持定时调度和手动触发两种同步模式。
+
 package main
 
 import (
@@ -10,26 +15,36 @@ import (
 	"time"
 )
 
+// 全局状态变量
+// lastSyncTime 由 lastSyncMu 保护（读写锁，允许并发读）；
+// syncMu 是互斥锁，确保同一时间只有一个 FetchAndSync 在执行；
+// syncCancel 用于取消正在进行的同步操作。
 var (
-	lastSyncTime time.Time
-	lastSyncMu   sync.RWMutex
-	syncMu       sync.Mutex
-	syncCancel   context.CancelFunc
-	apiBaseURL   = "https://aistupidlevel.info"
+	lastSyncTime time.Time         // 最近一次成功同步的时间戳
+	lastSyncMu   sync.RWMutex      // 保护 lastSyncTime 的读写锁，支持并发读、互斥写
+	syncMu       sync.Mutex        // 同步互斥锁，防止并发同步导致数据竞争和重复写入
+	syncCancel   context.CancelFunc // 取消正在运行的同步操作（当前未使用，保留供外部中断）
+	apiBaseURL   = "https://aistupidlevel.info" // 上游数据 API 的基础 URL
 )
 
+// getLastSyncTime 返回最近一次成功同步的时间。
+// 通过 lastSyncMu 的读锁保证并发安全，多个读操作可同时执行。
 func getLastSyncTime() time.Time {
 	lastSyncMu.RLock()
 	defer lastSyncMu.RUnlock()
 	return lastSyncTime
 }
 
+// setLastSyncTime 设置最近一次成功同步的时间。
+// 通过 lastSyncMu 的写锁保证写入互斥，防止与其他读/写操作冲突。
 func setLastSyncTime(t time.Time) {
 	lastSyncMu.Lock()
 	defer lastSyncMu.Unlock()
 	lastSyncTime = t
 }
 
+// CachedResponse 对应上游 /dashboard/cached 接口的响应结构。
+// 包含模型评分列表、历史评分数据（historyMap）、以及当前检测到的退化/异常。
 type CachedResponse struct {
 	Success bool `json:"success"`
 	Data    struct {
@@ -75,6 +90,8 @@ type CachedResponse struct {
 	} `json:"data"`
 }
 
+// AlertsResponse 对应上游 /dashboard/alerts 接口的响应结构。
+// 包含当前活跃的模型警报（如性能下降、异常行为等）。
 type AlertsResponse struct {
 	Success bool `json:"success"`
 	Data    []struct {
@@ -86,6 +103,8 @@ type AlertsResponse struct {
 	} `json:"data"`
 }
 
+// GlobalIndexResponse 对应上游 /dashboard/global-index 接口的响应结构。
+// 包含 AI Stupid 全局指数（所有模型综合评分）的当前值和历史趋势。
 type GlobalIndexResponse struct {
 	Success bool `json:"success"`
 	Data    struct {
@@ -105,6 +124,8 @@ type GlobalIndexResponse struct {
 	} `json:"data"`
 }
 
+// ProviderReliabilityResponse 对应上游 /analytics/provider-reliability 接口的响应结构。
+// 提供各模型提供商（如 OpenAI、Anthropic）的可靠性指标和历史故障数据。
 type ProviderReliabilityResponse struct {
 	Success bool `json:"success"`
 	Data    []struct {
@@ -121,6 +142,8 @@ type ProviderReliabilityResponse struct {
 	} `json:"data"`
 }
 
+// RecommendationsResponse 对应上游 /analytics/recommendations 接口的响应结构。
+// 提供基于当前数据的模型推荐（最适合编码、最可靠、响应最快等）。
 type RecommendationsResponse struct {
 	Success bool `json:"success"`
 	Data    struct {

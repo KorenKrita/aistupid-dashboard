@@ -11,8 +11,12 @@ import (
 	"time"
 )
 
+// setupTestData 向测试数据库中插入一组完整的测试数据，涵盖所有表：
+// models、scores_history、degradations、alerts、global_index、
+// provider_reliability、recommendations、transparency、model_freshness。
+// 时间点覆盖当前、12小时前、5天前、10天前、20天前，用于测试不同时间范围的时间序列查询。
 func setupTestData(t *testing.T) {
-	// Insert a test model
+	// 插入一个测试模型
 	_, err := DB.Exec(`INSERT INTO models (id, name, provider, vendor, is_reasoning, is_new, is_stale, status, standard_error)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		"test-model-1", "Test Model 1", "Test Provider 1", "Test Vendor 1", 1, 0, 0, "active", 0.05)
@@ -20,9 +24,9 @@ func setupTestData(t *testing.T) {
 		t.Fatalf("setupTestData failed inserting model: %v", err)
 	}
 
-	// Insert scores history
 	now := time.Now().UTC()
-	// Current score (suite = 'current')
+
+	// 插入当前分数（suite='current'），用于测试 /api/scores 无 period 参数时返回最新分数
 	_, err = DB.Exec(`INSERT INTO scores_history (model_id, timestamp, score, stupid_score, trend, confidence_lower, confidence_upper, suite,
 		ax_correctness, ax_complexity, ax_code_quality, ax_efficiency, ax_stability,
 		ax_edge_cases, ax_debugging, ax_format, ax_safety)
@@ -33,7 +37,7 @@ func setupTestData(t *testing.T) {
 		t.Fatalf("setupTestData failed inserting current score: %v", err)
 	}
 
-	// Score from 12 hours ago (within 24h)
+	// 插入 12 小时前的历史分数（在 24h 查询范围内），用于测试 period=24h 时应返回 2 条记录
 	_, err = DB.Exec(`INSERT INTO scores_history (model_id, timestamp, score, stupid_score, trend, confidence_lower, confidence_upper, suite)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		"test-model-1", now.Add(-12*time.Hour), 83, 83.0, "stable", 79.0, 87.0, "regular")
@@ -41,7 +45,7 @@ func setupTestData(t *testing.T) {
 		t.Fatalf("setupTestData failed inserting history score: %v", err)
 	}
 
-	// Score from 5 days ago (within 7d)
+	// 插入 5 天前的历史分数（在 7d 查询范围内），用于测试 period=7d 时应返回 3 条记录
 	_, err = DB.Exec(`INSERT INTO scores_history (model_id, timestamp, score, stupid_score, trend, confidence_lower, confidence_upper, suite)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		"test-model-1", now.Add(-5*24*time.Hour), 80, 80.0, "stable", 75.0, 85.0, "regular")
@@ -49,7 +53,7 @@ func setupTestData(t *testing.T) {
 		t.Fatalf("setupTestData failed inserting history score: %v", err)
 	}
 
-	// Score from 10 days ago (within 14d)
+	// 插入 10 天前的历史分数（在 14d 查询范围内），用于测试 period=14d 时应返回 4 条记录
 	_, err = DB.Exec(`INSERT INTO scores_history (model_id, timestamp, score, stupid_score, trend, confidence_lower, confidence_upper, suite)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		"test-model-1", now.Add(-10*24*time.Hour), 78, 78.0, "stable", 73.0, 83.0, "regular")
@@ -57,7 +61,7 @@ func setupTestData(t *testing.T) {
 		t.Fatalf("setupTestData failed inserting history score: %v", err)
 	}
 
-	// Score from 20 days ago (within 30d)
+	// 插入 20 天前的历史分数（在 30d 查询范围内），用于测试 period=30d 时应返回 5 条记录
 	_, err = DB.Exec(`INSERT INTO scores_history (model_id, timestamp, score, stupid_score, trend, confidence_lower, confidence_upper, suite)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		"test-model-1", now.Add(-20*24*time.Hour), 75, 75.0, "stable", 70.0, 80.0, "regular")
@@ -65,7 +69,7 @@ func setupTestData(t *testing.T) {
 		t.Fatalf("setupTestData failed inserting history score: %v", err)
 	}
 
-	// Insert degradation
+	// 插入一条性能退化记录，用于测试 /api/degradations 端点
 	_, err = DB.Exec(`INSERT INTO degradations (model_id, model_name, provider, current_score, baseline_score, drop_percentage, z_score, severity, detected_at, message, type)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		"test-model-1", "Test Model 1", "Test Provider 1", 75, 85, 11, "2.1", "medium", now, "Performance drop", "score")
@@ -73,7 +77,7 @@ func setupTestData(t *testing.T) {
 		t.Fatalf("setupTestData failed inserting degradation: %v", err)
 	}
 
-	// Insert alert
+	// 插入一条告警记录，用于测试 /api/alerts 端点
 	_, err = DB.Exec(`INSERT INTO alerts (model_name, provider, issue, severity, detected_at)
 		VALUES (?, ?, ?, ?, ?)`,
 		"Test Model 1", "Test Provider 1", "Latency spike", "high", now)
@@ -81,7 +85,7 @@ func setupTestData(t *testing.T) {
 		t.Fatalf("setupTestData failed inserting alert: %v", err)
 	}
 
-	// Insert global index
+	// 插入全局健康指数，用于测试 /api/global-index 端点
 	_, err = DB.Exec(`INSERT INTO global_index (timestamp, global_score, models_count, trend, performing_well, total_models)
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		now, 82, 15, "up", 12, 15)
@@ -89,7 +93,7 @@ func setupTestData(t *testing.T) {
 		t.Fatalf("setupTestData failed inserting global index: %v", err)
 	}
 
-	// Insert provider reliability
+	// 插入提供商可靠性数据，用于测试 /api/provider-reliability 端点
 	_, err = DB.Exec(`INSERT INTO provider_reliability (provider, trust_score, total_incidents, incidents_per_month, avg_recovery_hours, last_incident, trend, active_models, top_performers, is_available)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		"Test Provider 1", 95, 2, 0, "1.5", now, "stable", 5, 2, 1)
@@ -97,7 +101,7 @@ func setupTestData(t *testing.T) {
 		t.Fatalf("setupTestData failed inserting provider reliability: %v", err)
 	}
 
-	// Insert recommendation
+	// 插入一条模型推荐，用于测试 /api/recommendations 端点
 	_, err = DB.Exec(`INSERT INTO recommendations (type, model_id, model_name, vendor, score, reason, evidence, extra_data)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		"best_for_code", "test-model-1", "Test Model 1", "Test Vendor 1", 85, "High code quality score", "Passes all syntax checks", "")
@@ -105,7 +109,7 @@ func setupTestData(t *testing.T) {
 		t.Fatalf("setupTestData failed inserting recommendation: %v", err)
 	}
 
-	// Insert transparency
+	// 插入透明度/测试覆盖数据，用于测试 /api/transparency 端点
 	_, err = DB.Exec(`INSERT INTO transparency (id, last_update, total_tests, passed_tests, coverage, confidence, data_points_24h, next_test, models_fresh, models_stale, models_offline)
 		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		now, 100, 95, 95, 9, 240, now.Add(10*time.Minute), 5, 1, 0)
@@ -113,7 +117,7 @@ func setupTestData(t *testing.T) {
 		t.Fatalf("setupTestData failed inserting transparency: %v", err)
 	}
 
-	// Insert model freshness
+	// 插入模型新鲜度数据，用于测试 model_freshness 表的关联数据
 	_, err = DB.Exec(`INSERT INTO model_freshness (model_name, last_update, minutes_ago, status)
 		VALUES (?, ?, ?, ?)`,
 		"Test Model 1", now, 5, "fresh")
@@ -122,7 +126,13 @@ func setupTestData(t *testing.T) {
 	}
 }
 
+// TestMainAPI 测试所有主要 API 端点的 HTTP 行为，包括：
+// - 正常返回 200 状态码
+// - Content-Type 为 application/json
+// - 响应体可正确解析为预期的 JSON 结构
+// - 不同 period 参数对 scores 查询结果数量的影响
 func TestMainAPI(t *testing.T) {
+	// 使用独立的测试数据库文件，测试结束后清理
 	dbPath := "./test_main.db"
 	_ = os.Remove(dbPath)
 	defer os.Remove(dbPath)
@@ -133,10 +143,11 @@ func TestMainAPI(t *testing.T) {
 		t.Fatalf("InitDB failed: %v", err)
 	}
 
+	// 准备完整的测试数据：一个模型 + 5 条分数 + 退化/告警/全局指数等关联数据
 	setupTestData(t)
 	SetupRoutes()
 
-	// 1. Test GET /api/config
+	// 测试 GET /api/config：验证返回 200 和 blocked_models 字段
 	{
 		req := httptest.NewRequest("GET", "/api/config", nil)
 		w := httptest.NewRecorder()
@@ -157,7 +168,7 @@ func TestMainAPI(t *testing.T) {
 		}
 	}
 
-	// 2. Test GET /api/models
+	// 测试 GET /api/models：验证返回模型列表且字段正确
 	{
 		req := httptest.NewRequest("GET", "/api/models", nil)
 		w := httptest.NewRecorder()
@@ -183,7 +194,7 @@ func TestMainAPI(t *testing.T) {
 		}
 	}
 
-	// 3. Test GET /api/scores (none / empty)
+	// 测试 GET /api/scores（无 period 参数）：默认只返回 suite='current' 的最新分数，应返回 1 条
 	{
 		req := httptest.NewRequest("GET", "/api/scores", nil)
 		w := httptest.NewRecorder()
@@ -209,7 +220,7 @@ func TestMainAPI(t *testing.T) {
 		}
 	}
 
-	// 3. Test GET /api/scores (24h)
+	// 测试 GET /api/scores?period=24h：24 小时内共 2 条（当前 + 12 小时前）
 	{
 		req := httptest.NewRequest("GET", "/api/scores?period=24h", nil)
 		w := httptest.NewRecorder()
@@ -225,12 +236,13 @@ func TestMainAPI(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &scores); err != nil {
 			t.Errorf("GET /api/scores?period=24h: failed to unmarshal JSON: %v", err)
 		}
+		// 期望 2 条：suite='current'（现在）+ suite='regular'（12 小时前）
 		if len(scores) != 2 {
 			t.Errorf("GET /api/scores?period=24h: expected 2 points, got %d", len(scores))
 		}
 	}
 
-	// 3. Test GET /api/scores (7d)
+	// 测试 GET /api/scores?period=7d：7 天内共 3 条（当前 + 12h + 5d）
 	{
 		req := httptest.NewRequest("GET", "/api/scores?period=7d", nil)
 		w := httptest.NewRecorder()
@@ -246,12 +258,13 @@ func TestMainAPI(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &scores); err != nil {
 			t.Errorf("GET /api/scores?period=7d: failed to unmarshal JSON: %v", err)
 		}
+		// 期望 3 条：当前 + 12h + 5d
 		if len(scores) != 3 {
 			t.Errorf("GET /api/scores?period=7d: expected 3 points, got %d", len(scores))
 		}
 	}
 
-	// 3. Test GET /api/scores (14d)
+	// 测试 GET /api/scores?period=14d：14 天内共 4 条（当前 + 12h + 5d + 10d）
 	{
 		req := httptest.NewRequest("GET", "/api/scores?period=14d", nil)
 		w := httptest.NewRecorder()
@@ -267,12 +280,13 @@ func TestMainAPI(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &scores); err != nil {
 			t.Errorf("GET /api/scores?period=14d: failed to unmarshal JSON: %v", err)
 		}
+		// 期望 4 条：当前 + 12h + 5d + 10d
 		if len(scores) != 4 {
 			t.Errorf("GET /api/scores?period=14d: expected 4 points, got %d", len(scores))
 		}
 	}
 
-	// 3. Test GET /api/scores (30d)
+	// 测试 GET /api/scores?period=30d：30 天内共 5 条（当前 + 12h + 5d + 10d + 20d）
 	{
 		req := httptest.NewRequest("GET", "/api/scores?period=30d", nil)
 		w := httptest.NewRecorder()
@@ -288,12 +302,13 @@ func TestMainAPI(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &scores); err != nil {
 			t.Errorf("GET /api/scores?period=30d: failed to unmarshal JSON: %v", err)
 		}
+		// 期望 5 条：当前 + 12h + 5d + 10d + 20d
 		if len(scores) != 5 {
 			t.Errorf("GET /api/scores?period=30d: expected 5 points, got %d", len(scores))
 		}
 	}
 
-	// 4. Test GET /api/degradations
+	// 测试 GET /api/degradations：验证退化记录的正确性
 	{
 		req := httptest.NewRequest("GET", "/api/degradations", nil)
 		w := httptest.NewRecorder()
@@ -319,7 +334,7 @@ func TestMainAPI(t *testing.T) {
 		}
 	}
 
-	// 5. Test GET /api/alerts
+	// 测试 GET /api/alerts：验证告警记录的字段正确性
 	{
 		req := httptest.NewRequest("GET", "/api/alerts", nil)
 		w := httptest.NewRecorder()
@@ -345,7 +360,7 @@ func TestMainAPI(t *testing.T) {
 		}
 	}
 
-	// 6. Test handleManualSync Method Not Allowed
+	// 测试 handleManualSync 对非 POST 请求返回 405 Method Not Allowed
 	{
 		req := httptest.NewRequest("GET", "/api/sync-now", nil)
 		w := httptest.NewRecorder()
@@ -356,7 +371,8 @@ func TestMainAPI(t *testing.T) {
 		}
 	}
 
-	// 6. Test handleManualSync POST Success/Failure
+	// 测试 handleManualSync POST 请求：成功时返回 200+success=true，失败时返回 500
+	// 由于没有 mock 上游 API，此测试验证响应码在预期范围内即可
 	{
 		req := httptest.NewRequest("POST", "/api/sync-now", nil)
 		w := httptest.NewRecorder()
@@ -378,7 +394,7 @@ func TestMainAPI(t *testing.T) {
 		}
 	}
 
-	// 7. Test GET /api/model/history missing id
+	// 测试 GET /api/model/history 缺失 id 参数时返回 400 Bad Request
 	{
 		req := httptest.NewRequest("GET", "/api/model/history", nil)
 		w := httptest.NewRecorder()
@@ -389,7 +405,7 @@ func TestMainAPI(t *testing.T) {
 		}
 	}
 
-	// 7. Test GET /api/model/history valid id
+	// 测试 GET /api/model/history 有效 id：返回该模型的所有历史分数（共 5 条）
 	{
 		req := httptest.NewRequest("GET", "/api/model/history?id=test-model-1", nil)
 		w := httptest.NewRecorder()
@@ -405,12 +421,13 @@ func TestMainAPI(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &history); err != nil {
 			t.Errorf("GET /api/model/history: failed to unmarshal JSON: %v", err)
 		}
+		// 期望 5 条：当前 + 12h + 5d + 10d + 20d
 		if len(history) != 5 {
 			t.Errorf("GET /api/model/history (valid id): expected 5 points, got %d", len(history))
 		}
 	}
 
-	// 7. Test GET /api/model/history with days limit
+	// 测试 GET /api/model/history 带 days=7 参数：只返回 7 天内的 3 条分数
 	{
 		req := httptest.NewRequest("GET", "/api/model/history?id=test-model-1&days=7", nil)
 		w := httptest.NewRecorder()
@@ -426,12 +443,13 @@ func TestMainAPI(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &history); err != nil {
 			t.Errorf("GET /api/model/history?days=7: failed to unmarshal JSON: %v", err)
 		}
+		// days=7 只返回当前 + 12h + 5d
 		if len(history) != 3 {
 			t.Errorf("GET /api/model/history?days=7: expected 3 points, got %d", len(history))
 		}
 	}
 
-	// Test GET /api/global-index
+	// 测试 GET /api/global-index：验证返回 200 和 JSON 响应头
 	{
 		req := httptest.NewRequest("GET", "/api/global-index", nil)
 		w := httptest.NewRecorder()
@@ -445,7 +463,7 @@ func TestMainAPI(t *testing.T) {
 		}
 	}
 
-	// Test GET /api/provider-reliability
+	// 测试 GET /api/provider-reliability：验证返回 200 和 JSON 响应头
 	{
 		req := httptest.NewRequest("GET", "/api/provider-reliability", nil)
 		w := httptest.NewRecorder()
@@ -459,7 +477,7 @@ func TestMainAPI(t *testing.T) {
 		}
 	}
 
-	// Test GET /api/recommendations
+	// 测试 GET /api/recommendations：验证返回 200 和 JSON 响应头
 	{
 		req := httptest.NewRequest("GET", "/api/recommendations", nil)
 		w := httptest.NewRecorder()
@@ -473,7 +491,7 @@ func TestMainAPI(t *testing.T) {
 		}
 	}
 
-	// Test GET /api/transparency
+	// 测试 GET /api/transparency：验证返回 200 和 JSON 响应头
 	{
 		req := httptest.NewRequest("GET", "/api/transparency", nil)
 		w := httptest.NewRecorder()
@@ -487,7 +505,7 @@ func TestMainAPI(t *testing.T) {
 		}
 	}
 
-	// Test GET /api/sync-status
+	// 测试 GET /api/sync-status：验证返回 200 和 JSON 响应头
 	{
 		req := httptest.NewRequest("GET", "/api/sync-status", nil)
 		w := httptest.NewRecorder()
@@ -502,9 +520,13 @@ func TestMainAPI(t *testing.T) {
 	}
 }
 
+// TestConfigFunctions 测试配置文件的加载、保存和并发安全行为。
+// 使用临时 config.json 文件，测试完成后恢复原始文件。
+// 子测试覆盖 missing file、valid JSON、invalid JSON、save、copy safety、set 和 concurrent access。
 func TestConfigFunctions(t *testing.T) {
 	const tempConfigFilename = "config.json"
 
+	// 备份现有的 config.json（如果存在），测试结束后恢复
 	var backupData []byte
 	backupExists := false
 	if _, err := os.Stat(tempConfigFilename); err == nil {
@@ -529,9 +551,11 @@ func TestConfigFunctions(t *testing.T) {
 		_ = os.Remove(tempConfigFilename)
 	}
 
+	// 场景：配置文件不存在时，loadConfig 应清空 BlockedModels
 	t.Run("loadConfig missing file", func(t *testing.T) {
 		deleteConfigFile()
 
+		// 先设置一个假值，验证 loadConfig 会清空它
 		configMu.Lock()
 		config.BlockedModels = []string{"dummy"}
 		configMu.Unlock()
@@ -544,6 +568,7 @@ func TestConfigFunctions(t *testing.T) {
 		}
 	})
 
+	// 场景：配置文件包含合法 JSON 时，loadConfig 应正确解析
 	t.Run("loadConfig valid JSON", func(t *testing.T) {
 		deleteConfigFile()
 
@@ -560,6 +585,7 @@ func TestConfigFunctions(t *testing.T) {
 		}
 	})
 
+	// 场景：配置文件包含非法 JSON 时，loadConfig 应清空 BlockedModels 且不 panic
 	t.Run("loadConfig invalid JSON", func(t *testing.T) {
 		deleteConfigFile()
 
@@ -568,6 +594,7 @@ func TestConfigFunctions(t *testing.T) {
 			t.Fatalf("Failed to write mock config.json: %v", err)
 		}
 
+		// 先设置一个假值，验证 loadConfig 会清空它
 		configMu.Lock()
 		config.BlockedModels = []string{"dummy"}
 		configMu.Unlock()
@@ -580,6 +607,7 @@ func TestConfigFunctions(t *testing.T) {
 		}
 	})
 
+	// 场景：saveConfig 应写入合法的 JSON 到文件
 	t.Run("saveConfig writes valid JSON", func(t *testing.T) {
 		deleteConfigFile()
 
@@ -607,6 +635,7 @@ func TestConfigFunctions(t *testing.T) {
 		}
 	})
 
+	// 场景：getBlockedModels 返回的是副本而非原始切片，外部修改不影响全局状态
 	t.Run("getBlockedModels returns a copy", func(t *testing.T) {
 		configMu.Lock()
 		config.BlockedModels = []string{"model-x", "model-y"}
@@ -617,20 +646,24 @@ func TestConfigFunctions(t *testing.T) {
 			t.Fatalf("Expected 2 elements, got %d", len(blocked))
 		}
 
+		// 修改返回的切片
 		blocked[0] = "mutated-model"
 
+		// 重新获取，验证全局配置未被污染
 		original := getBlockedModels()
 		if original[0] != "model-x" {
 			t.Errorf("Global config was mutated! Expected original[0] to be 'model-x', got %s", original[0])
 		}
 	})
 
+	// 场景：setBlockedModels 应同步更新内存和磁盘上的配置
 	t.Run("setBlockedModels updates config", func(t *testing.T) {
 		deleteConfigFile()
 
 		newModels := []string{"new-1", "new-2"}
 		setBlockedModels(newModels)
 
+		// 由于保存是异步 goroutine 执行的，需要轮询等待文件写入完成
 		var data []byte
 		var err error
 		for i := 0; i < 50; i++ {
@@ -659,6 +692,8 @@ func TestConfigFunctions(t *testing.T) {
 		}
 	})
 
+	// 场景：并发读写 config 不应导致 data race 或 panic。
+	// 使用 10 个 reader 和 10 个 writer goroutine，各执行 100 次读写操作。
 	t.Run("Concurrent access safety", func(t *testing.T) {
 		deleteConfigFile()
 
@@ -668,6 +703,7 @@ func TestConfigFunctions(t *testing.T) {
 
 		wg.Add(numWorkers * 2)
 
+		// 并发 reader：反复读取 BlockedModels
 		for i := 0; i < numWorkers; i++ {
 			go func() {
 				defer wg.Done()
@@ -677,6 +713,7 @@ func TestConfigFunctions(t *testing.T) {
 			}()
 		}
 
+		// 并发 writer：反复设置不同的 BlockedModels 值
 		for i := 0; i < numWorkers; i++ {
 			go func(workerID int) {
 				defer wg.Done()

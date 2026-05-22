@@ -6,101 +6,114 @@ import {
   Gauge, Users, Server, FileWarning, Award, Target, Sparkles, XCircle
 } from 'lucide-react';
 
-// Types
+// ============================================================
+// 类型定义 - 描述后端 API 返回的数据结构
+// ============================================================
+
+/** 模型元数据：名称、厂商、推理类型、状态等基本信息 */
 interface Model {
-  id: string;
-  name: string;
-  provider: string;
-  vendor: string;
-  isReasoning: boolean;
-  isNew: boolean;
-  isStale: boolean;
-  status: string;
-  standardError: number;
+  id: string;            // 模型唯一标识（如 claude-opus-4-6）
+  name: string;          // 模型展示名称（如 Claude Opus 4.6）
+  provider: string;      // 提供商 key（如 anthropic、openai）
+  vendor: string;        // 供应商全称（如 Anthropic）
+  isReasoning: boolean;  // 是否为推理模型（支持思考过程）
+  isNew: boolean;        // 是否为新上线模型
+  isStale: boolean;      // 数据是否已过期
+  status: string;        // 当前状态（active / degraded / down）
+  standardError: number; // 评分标准误差
 }
 
+/** 模型最新评分：综合得分、置信区间、各维度轴评分 */
 interface Score {
-  modelId: string;
-  modelName: string;
-  provider: string;
-  score: number;
-  trend: string;
-  confidenceLower: number;
-  confidenceUpper: number;
-  standardError: number;
-  timestamp: string;
-  axes: Record<string, number | null>;
+  modelId: string;                        // 对应 Model.id
+  modelName: string;                      // 模型展示名称
+  provider: string;                       // 提供商 key
+  score: number;                          // 综合得分（0-100）
+  trend: string;                          // 趋势方向：up / down / stable
+  confidenceLower: number;                // 95% 置信区间下限
+  confidenceUpper: number;                // 95% 置信区间上限
+  standardError: number;                  // 标准误差
+  timestamp: string;                      // 评分时间戳
+  axes: Record<string, number | null>;    // 各维度评分（13个轴，值为 0-1 或 null）
 }
 
+/** 历史评分数据点：用于趋势折线图 */
 interface HistoryPoint {
-  modelId: string;
-  modelName: string;
-  score: number;
-  timestamp: string;
-  suite: string;
-  axes: Record<string, number | null>;
+  modelId: string;                        // 模型 ID
+  modelName: string;                      // 模型名称
+  score: number;                          // 该时间点的综合得分
+  timestamp: string;                      // 数据采集时间
+  suite: string;                          // 数据来源：'current' / 'historyMap'
+  axes: Record<string, number | null>;    // 各维度评分快照
 }
 
+/** 性能退化记录：当前评分相比基线显著下降 */
 interface Degradation {
-  modelId: string;
-  modelName: string;
-  provider: string;
-  currentScore: number;
-  baselineScore: number;
-  dropPercentage: number;
-  zScore: string;
-  severity: string;
-  detectedAt: string;
-  message: string;
-  type: string;
+  modelId: string;        // 模型 ID
+  modelName: string;      // 模型名称
+  provider: string;       // 提供商 key
+  currentScore: number;   // 当前评分
+  baselineScore: number;  // 基线评分（退化前正常值）
+  dropPercentage: number; // 下降百分比
+  zScore: string;         // Z 分数（统计显著性）
+  severity: string;       // 严重程度：critical / major / warning / minor
+  detectedAt: string;     // 检测时间
+  message: string;        // 退化描述
+  type: string;           // 退化类型
 }
 
+/** 系统警报：服务异常、超时、可用性问题 */
 interface Alert {
-  modelName: string;
-  provider: string;
-  issue: string;
-  severity: string;
-  detectedAt: string;
+  modelName: string;   // 模型名称
+  provider: string;    // 提供商 key
+  issue: string;       // 问题描述
+  severity: string;    // 严重程度：critical / warning / minor
+  detectedAt: string;  // 检测时间
 }
 
+/** 全局智能指数：整体生态健康度评分时间序列 */
 interface GlobalIndex {
-  timestamp: string;
-  globalScore: number;
-  modelsCount: number;
-  trend: string;
-  performingWell: number;
-  totalModels: number;
+  timestamp: string;    // 数据时间点
+  globalScore: number;  // 全局综合指数（0-100）
+  modelsCount: number;  // 参与计算的模型数
+  trend: string;        // 趋势方向
+  performingWell: number; // 表现良好的模型数
+  totalModels: number;  // 总模型数
 }
 
+/** 厂商可靠性数据：信任评分、事故统计、可用性 */
 interface ProviderReliability {
-  provider: string;
-  trustScore: number;
-  totalIncidents: number;
-  incidentsPerMonth: number;
-  avgRecoveryHours: string;
-  lastIncident: string;
-  trend: string;
-  activeModels: number;
-  topPerformers: number;
-  isAvailable: boolean;
+  provider: string;             // 提供商 key
+  trustScore: number;           // 信任评分（0-100）
+  totalIncidents: number;       // 总事故次数
+  incidentsPerMonth: number;    // 月均事故数
+  avgRecoveryHours: string;     // 平均恢复时间（小时）
+  lastIncident: string;         // 最近事故时间
+  trend: string;                // 趋势：improving / moderate / unreliable
+  activeModels: number;         // 活跃模型数
+  topPerformers: number;        // 顶级表现者数
+  isAvailable: boolean;         // 当前是否在线可用
 }
 
+/** 智能推荐条目：最佳编程 / 最可靠 / 最快响应 / 应避免 */
 interface Recommendation {
-  type: string;
-  modelId: string;
-  modelName: string;
-  vendor: string;
-  score: number;
-  reason: string;
-  evidence: string;
-  extraData?: string;
+  type: string;         // 推荐类型：best_for_code / most_reliable / fastest_response / avoid_now
+  modelId: string;      // 模型 ID
+  modelName: string;    // 模型名称
+  vendor: string;       // 供应商
+  score: number;        // 对应评分
+  reason: string;       // 推荐理由
+  evidence: string;     // 数据依据
+  extraData?: string;   // 额外数据（如 avoid_list 的 JSON 序列化）
 }
 
+/** 同步状态：数据上次同步和下次同步时间 */
 interface SyncStatus {
-  lastSync: string;
-  nextSync: string;
+  lastSync: string;  // 上次同步时间
+  nextSync: string;  // 下次同步时间
 }
 
+/** 13 个测试维度的中英文映射表，用于图表轴标签和详情面板 */
 const AXES_ZH: Record<string, string> = {
   correctness: '正确性',
   complexity: '复杂度',
@@ -117,6 +130,7 @@ const AXES_ZH: Record<string, string> = {
   contextWindow: '上下文窗口'
 };
 
+/** 厂商名称中英文映射 */
 const PROVIDER_ZH: Record<string, string> = {
   openai: 'OpenAI',
   anthropic: 'Anthropic',
@@ -127,6 +141,7 @@ const PROVIDER_ZH: Record<string, string> = {
   deepseek: 'DeepSeek'
 };
 
+/** 警报严重程度中英文映射 */
 const SEVERITY_ZH: Record<string, string> = {
   critical: '严重',
   major: '重要',
@@ -134,6 +149,7 @@ const SEVERITY_ZH: Record<string, string> = {
   minor: '轻微'
 };
 
+/** 时间范围选择器选项：value 为 API 参数，label 为展示文字 */
 const PERIOD_OPTIONS = [
   { value: 'latest', label: '最新' },
   { value: '24h', label: '24小时' },
@@ -142,6 +158,7 @@ const PERIOD_OPTIONS = [
   { value: '30d', label: '30天' }
 ];
 
+/** 模型颜色调色板（20 色循环使用）用于柱状图、雷达图、标签区分 */
 const MODEL_COLORS = [
   '#2563eb', '#dc2626', '#16a34a', '#ca8a04', '#9333ea',
   '#0891b2', '#e11d48', '#65a30d', '#ea580c', '#4f46e5',
@@ -149,40 +166,85 @@ const MODEL_COLORS = [
   '#059669', '#b91c1c', '#c026d3', '#475569', '#15803d'
 ];
 
+/**
+ * AIStupid 监控中心 - 主应用组件
+ *
+ * 功能概述：
+ * - 展示 AI 模型的性能评分、历史趋势、退化警报和厂商可靠性
+ * - 支持雷达图对比、历史趋势查看、模型筛选和排序
+ * - 自动定时同步数据，支持手动触发同步
+ *
+ * 数据流：
+ * 1. 组件挂载时通过 fetchAll 加载所有初始数据
+ * 2. 每 5 秒轮询 /api/config 获取阻塞列表
+ * 3. period 变化时通过 fetchHistory 加载历史评分
+ * 4. 点击模型通过 fetchModelHistory 加载单个模型近30天历史
+ * 5. useMemo 对原始数据做过滤、排序和图表配置派生
+ */
 export default function App() {
+  // 主题切换状态：从 localStorage 恢复，或跟随系统偏好
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const saved = localStorage.getItem('theme');
     if (saved) return saved as 'light' | 'dark';
     return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   });
 
+  // ---------- 远程数据状态 ----------
+  // 模型元数据列表（id、名称、供应商、推理类型等）
   const [models, setModels] = useState<Model[]>([]);
+  // 各模型最新评分及轴数据（用于排行榜和雷达图）
   const [scores, setScores] = useState<Score[]>([]);
+  // 历史评分时间序列（用于趋势折线图）
   const [history, setHistory] = useState<HistoryPoint[]>([]);
+  // 性能退化记录（当前 vs 基线）
   const [degradations, setDegradations] = useState<Degradation[]>([]);
+  // 系统警报列表
   const [alerts, setAlerts] = useState<Alert[]>([]);
+  // 全局智能指数时间序列
   const [globalIndex, setGlobalIndex] = useState<GlobalIndex[]>([]);
+  // 各厂商可靠性数据
   const [providerReliability, setProviderReliability] = useState<ProviderReliability[]>([]);
+  // 智能推荐列表（最佳编程、最可靠、最快响应、应避免）
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
+  // 同步状态（上次/下次同步时间）
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
 
+  // ---------- UI 交互状态 ----------
+  // 时间范围选择：latest / 24h / 7d / 14d / 30d
   const [period, setPeriod] = useState('latest');
+  // 概览页右侧选中的模型 ID（展开雷达图详情）
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  // 历史趋势图中可见的模型 ID 列表
   const [visibleModels, setVisibleModels] = useState<string[]>([]);
+  // 被阻塞（隐藏）的模型 ID 列表
   const [blockedModels, setBlockedModels] = useState<string[]>([]);
+  // 搜索关键字（过滤模型列表）
   const [searchQuery, setSearchQuery] = useState('');
+  // 当前激活的标签页：概览 / 模型详情 / 警报 / 厂商
   const [activeTab, setActiveTab] = useState<'overview' | 'models' | 'alerts' | 'providers'>('overview');
+  // 手动同步进行中标志（控制按钮旋转动画）
   const [isSyncing, setIsSyncing] = useState(false);
+  // 历史趋势数据加载中标志
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  // 模型对比列表中选中的模型 ID 列表（最多3个）
   const [compareModels, setCompareModels] = useState<string[]>([]);
+  // 模型列表页排序字段：score 或轴名称
   const [sortBy, setSortBy] = useState<string>('score');
+  // 模型详情弹窗中的模型 ID
   const [detailModel, setDetailModel] = useState<string | null>(null);
+  // 模型详情弹窗中的图表维度：score 或具体轴名称
   const [detailAxis, setDetailAxis] = useState<string>('score');
+  // 模型详情弹窗中的历史数据
   const [modelHistory, setModelHistory] = useState<HistoryPoint[]>([]);
+  // 模型详情历史数据加载中标志
   const [isLoadingModelHistory, setIsLoadingModelHistory] = useState(false);
+  // 左侧列高度（用于两列等高对齐）
   const [leftColHeight, setLeftColHeight] = useState<number | null>(null);
+  // 左侧列 DOM 引用（用于 ResizeObserver 测量高度）
   const leftColRef = useRef<HTMLDivElement>(null);
 
+  // 使用 ResizeObserver 监听左侧列高度变化，同步设置右侧列高度以实现两列等高布局
+  // 依赖：activeTab === 'overview' 时才生效，scores/period 变化时重新测量
   useLayoutEffect(() => {
     if (leftColRef.current && activeTab === 'overview') {
       const updateHeight = () => {
@@ -193,10 +255,13 @@ export default function App() {
       updateHeight();
       const observer = new ResizeObserver(updateHeight);
       observer.observe(leftColRef.current);
+      // 清理：组件卸载或依赖变化时断开 observer
       return () => observer.disconnect();
     }
   }, [activeTab, scores.length, period]);
 
+  // 按名称 + 版本号对模型排序：先按前缀字母序，再按版本号降序
+  // 例如：kimi-k2.5 排在 kimi-k2.4 之前，gpt-4 排在 gpt-3.5 之前
   const sortModelName = (a: string, b: string): number => {
     const extractParts = (name: string) => {
       // Handle patterns like: kimi-k2.5, gpt-5.4, claude-opus-4-6
@@ -214,16 +279,20 @@ export default function App() {
   };
 
   const toggleTheme = () => {
+    // 亮/暗主题切换：更新 state、切换 html 根元素 class、持久化到 localStorage
     const next = theme === 'light' ? 'dark' : 'light';
     setTheme(next);
     document.documentElement.classList.toggle('dark', next === 'dark');
     localStorage.setItem('theme', next);
   };
 
+  // 初始化：根据当前 theme 值设置 html 根元素的 dark class
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
   }, []);
 
+  // 首次加载所有数据：并行请求 9 个 API 端点，逐个安全解析 JSON 并更新状态
+  // 通过 AbortSignal 支持取消请求（组件卸载时自动中止）
   const fetchAll = useCallback(async (signal?: AbortSignal) => {
     try {
       const responses = await Promise.all([
@@ -262,6 +331,8 @@ export default function App() {
     }
   }, []);
 
+  // 根据 period 参数加载历史评分数据
+  // period === 'latest' 时不加载，直接清空历史状态
   const fetchHistory = useCallback(async (signal?: AbortSignal) => {
     if (period === 'latest') {
       setHistory([]);
@@ -279,6 +350,8 @@ export default function App() {
     }
   }, [period]);
 
+  // 组件挂载时触发首次数据加载，并启动 /api/config 轮询（每 5 秒）
+  // 使用 AbortController 管理生命周期：组件卸载时中止所有未完成的请求
   useEffect(() => {
     const controller = new AbortController();
     fetchAll(controller.signal);
@@ -293,17 +366,20 @@ export default function App() {
       }
     }, 5000);
     return () => {
+      // 清理：中止请求 + 清除定时器
       controller.abort();
       clearInterval(configInterval);
     };
   }, [fetchAll]);
 
+  // period 变化时重新加载历史数据，并使用 AbortController 取消上一次未完成的请求
   useEffect(() => {
     const controller = new AbortController();
     fetchHistory(controller.signal);
     return () => controller.abort();
   }, [fetchHistory]);
 
+  // 手动触发数据同步：POST /api/sync-now，同步完成后刷新所有数据
   const triggerSync = async () => {
     setIsSyncing(true);
     try {
@@ -314,6 +390,9 @@ export default function App() {
     setIsSyncing(false);
   };
 
+  // ---------- 派生数据：过滤 & 排序 ----------
+  // 过滤阻塞的模型 + 按搜索关键字过滤 + 按名称+版本排序
+  // 依赖：models / blockedModels / searchQuery 任一变化时重新计算
   const filteredModels = useMemo(() => {
     return models
       .filter(m => !blockedModels.includes(m.id))
@@ -321,6 +400,8 @@ export default function App() {
       .sort((a, b) => sortModelName(a.name, b.name));
   }, [models, blockedModels, searchQuery]);
 
+  // 过滤阻塞模型 + 搜索关键字 + 按 sortBy 排序
+  // sortBy === 'score' 时按综合得分降序，否则按对应轴值降序
   const filteredScores = useMemo(() => {
     const filtered = scores
       .filter(s => !blockedModels.includes(s.modelId))
@@ -335,6 +416,8 @@ export default function App() {
     });
   }, [scores, blockedModels, searchQuery, sortBy]);
 
+  // 历史数据过滤：只保留可见模型 + 未被阻塞的模型
+  // 依赖：history / blockedModels / visibleModels 任一变化时重新计算
   const filteredHistory = useMemo(() => {
     return history.filter(h =>
       !blockedModels.includes(h.modelId) &&
@@ -342,17 +425,23 @@ export default function App() {
     );
   }, [history, blockedModels, visibleModels]);
 
+  // 性能退化警报过滤：只保留当前可见且未被阻塞的模型
+  // 依赖：degradations / blockedModels / filteredScores（派生）任一变化时重新计算
   const filteredDegradations = useMemo(() => {
+    // 从已过滤评分列表中提取可见模型 ID 集合，作为退化列表的白名单
     const visibleModelIds = new Set(filteredScores.map(s => s.modelId));
     return degradations.filter(d => !blockedModels.includes(d.modelId) && visibleModelIds.has(d.modelId));
   }, [degradations, blockedModels, filteredScores]);
 
+  // 系统警报过滤：只保留当前可见且未被阻塞的模型
+  // 依赖：alerts / models / blockedModels / filteredScores 任一变化时重新计算
   const filteredAlerts = useMemo(() => {
     const visibleNames = new Set(filteredScores.map(s => s.modelName));
     const blockedNames = models.filter(m => blockedModels.includes(m.id)).map(m => m.name);
     return alerts.filter(a => !blockedNames.includes(a.modelName) && visibleNames.has(a.modelName));
   }, [alerts, models, blockedModels, filteredScores]);
 
+  // 如果当前详情模型被过滤掉（阻塞或搜索筛除），自动关闭详情弹窗并清空历史数据
   useEffect(() => {
     if (detailModel && !filteredScores.find(s => s.modelId === detailModel)) {
       setDetailModel(null);
@@ -360,12 +449,19 @@ export default function App() {
     }
   }, [detailModel, filteredScores]);
 
+  /** 根据模型 ID 获取固定颜色（按 models 数组中索引模 20 取色） */
   const getModelColor = (modelId: string) => {
     const idx = models.findIndex(m => m.id === modelId);
     if (idx < 0) return MODEL_COLORS[0];
     return MODEL_COLORS[idx % MODEL_COLORS.length];
   };
 
+  /**
+   * 历史趋势折线图 ECharts 配置
+   * 将 filteredHistory 按 modelId 分组，每个模型生成一条折线 series
+   * x 轴为时间，y 轴为综合得分（0-100），支持 Tooltip 显示多模型对比
+   * 依赖：filteredHistory / models / theme 任一变化时重新生成配置对象
+   */
   const historyChartOptions = useMemo(() => {
     const isDark = theme === 'dark';
     const modelIds = [...new Set(filteredHistory.map(h => h.modelId))];
@@ -437,6 +533,11 @@ export default function App() {
     };
   }, [filteredHistory, models, theme]);
 
+  /**
+   * 单模型雷达图 ECharts 配置（用于右侧栏选中模型详情）
+   * 过滤掉 4 个深度测试维度（memoryRetention / hallucinationRate / planCoherence / contextWindow）
+   * 只显示核心 9 维度，值为 0-1 归一化数据，max=1
+   */
   const getRadarChartOptions = (axes: Record<string, number | null>) => {
     const isDark = theme === 'dark';
     const deepTestKeys = ['memoryRetention', 'hallucinationRate', 'planCoherence', 'contextWindow'];
@@ -471,6 +572,12 @@ export default function App() {
     };
   };
 
+  /**
+   * 全局智能指数趋势图 ECharts 配置
+   * 将 globalIndex 按时间升序排列，绘制为带填充区域的平滑折线
+   * y 轴为全局指数（0-100），x 轴为时间
+   * 依赖：globalIndex / theme 任一变化时重新生成
+   */
   const globalIndexChartOptions = useMemo(() => {
     const isDark = theme === 'dark';
     const sorted = [...globalIndex].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
@@ -512,8 +619,15 @@ export default function App() {
     };
   }, [globalIndex, theme]);
 
+  // 当前选中模型的评分数据（用于右侧雷达图和详情面板），null 表示未选中
   const selectedModelData = selectedModel ? filteredScores.find(s => s.modelId === selectedModel) : null;
 
+  /**
+   * 模型得分柱状图 ECharts 配置（概览页最新数据展示）
+   * 按综合得分降序排列，每根柱子使用 MODEL_COLORS 渐变着色
+   * y 轴为得分（0-100），x 轴为模型名称（带 45 度旋转）
+   * 依赖：filteredScores / theme 任一变化时重新生成
+   */
   const latestBarChartOptions = useMemo(() => {
     const isDark = theme === 'dark';
     const sortedScores = [...filteredScores].sort((a, b) => b.score - a.score);
@@ -563,6 +677,12 @@ export default function App() {
     };
   }, [filteredScores, theme]);
 
+  /**
+   * 多模型对比雷达图 ECharts 配置（模型详情页对比区域）
+   * 每个选中模型生成一条雷达数据系列，使用 MODEL_COLORS 区分
+   * 同样过滤 4 个深度测试维度，最多支持 3 个模型同时对比
+   * 模型数量不足 3 时右侧显示备选列表
+   */
   const getCompareRadarOptions = () => {
     const isDark = theme === 'dark';
     const compareData = compareModels.map(id => filteredScores.find(s => s.modelId === id)).filter(Boolean) as Score[];
@@ -612,8 +732,14 @@ export default function App() {
     });
   };
 
+  // 模型详情历史请求的 AbortController 引用，用于取消上一次未完成的请求
   const modelHistoryAbortRef = useRef<AbortController | null>(null);
 
+  /**
+   * 获取指定模型近 30 天历史评分数据
+   * 使用 AbortController 实现：新请求发起时自动中止上一次未完成的请求
+   * 请求完成后检查 signal.aborted，避免竞态条件下旧响应覆盖新数据
+   */
   const fetchModelHistory = async (modelId: string) => {
     if (modelHistoryAbortRef.current) {
       modelHistoryAbortRef.current.abort();
@@ -636,12 +762,18 @@ export default function App() {
     }
   };
 
+  /**
+   * 打开模型详情弹窗：设置目标模型 ID、重置维度为综合得分、发起历史数据请求
+   */
   const openModelDetail = (modelId: string) => {
     setDetailModel(modelId);
     setDetailAxis('score');
     fetchModelHistory(modelId);
   };
 
+  /**
+   * 关闭模型详情弹窗：中止进行中的请求、清空 state、重置 AbortController
+   */
   const closeModelDetail = () => {
     if (modelHistoryAbortRef.current) {
       modelHistoryAbortRef.current.abort();
@@ -651,6 +783,12 @@ export default function App() {
     setModelHistory([]);
   };
 
+  /**
+   * 模型详情页历史趋势图 ECharts 配置
+   * - detailAxis === 'score' 时展示综合得分趋势（0-100 原始值）
+   * - detailAxis 为具体轴名称时展示该维度趋势（0-1 归一化值转换为百分比显示）
+   * 数据源为 modelHistory（近 30 天），支持 Tooltip 显示具体数值
+   */
   const getModelDetailChartOptions = () => {
     const isDark = theme === 'dark';
     if (modelHistory.length === 0) return null;
@@ -722,18 +860,26 @@ export default function App() {
     };
   };
 
+  /**
+   * 当前最新的全局智能指数（取 globalIndex 时间戳最大的一个）
+   * 用于概览页头部统计卡片展示
+   */
   const currentGlobal = useMemo(() => {
     if (globalIndex.length === 0) return null;
     return globalIndex.reduce((latest, g) =>
       new Date(g.timestamp).getTime() > new Date(latest.timestamp).getTime() ? g : latest
     );
   }, [globalIndex]);
+
+  // 按类型提取推荐数据，用于右侧智能推荐面板展示
   const bestForCode = recommendations.find(r => r.type === 'best_for_code');
   const mostReliable = recommendations.find(r => r.type === 'most_reliable');
   const fastestResponse = recommendations.find(r => r.type === 'fastest_response');
 
   return (
     <div className="min-h-screen bg-bgApp text-textMain transition-colors duration-200">
+      {/* ---------- 顶部导航栏 ---------- */}
+      {/* 固定在页面顶部，包含 logo、版本号、同步状态、同步按钮、主题切换 */}
       <header className="sticky top-0 z-50 backdrop-blur-md bg-bgApp/90 border-b border-border">
         <div className="max-w-[1600px] mx-auto px-4 h-14 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -770,8 +916,13 @@ export default function App() {
         </div>
       </header>
 
+      {/* ---------- 主内容区域 ---------- */}
+      {/* 最大宽度 1600px，居中，内边距，垂直间距 */}
       <div className="max-w-[1600px] mx-auto px-4 py-6">
+        {/* ---------- 概览卡片：全局指数、监控数、退化、警报 ---------- */}
+        {/* 4 列网格（移动端 2 列），每卡片包含图标、标题、数值 */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+          {/* 全局智能指数卡片 */}
           <div className="p-4 rounded-xl border border-border bg-bgSurface card-hover">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-lg bg-primary/10 text-primary flex items-center justify-center flex-shrink-0">
@@ -784,6 +935,7 @@ export default function App() {
             </div>
           </div>
 
+          {/* 监控模型数卡片 */}
           <div className="p-4 rounded-xl border border-border bg-bgSurface card-hover">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-lg bg-success/10 text-success flex items-center justify-center flex-shrink-0">
@@ -796,6 +948,7 @@ export default function App() {
             </div>
           </div>
 
+          {/* 性能退化警报卡片 */}
           <div className="p-4 rounded-xl border border-border bg-bgSurface card-hover">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-lg bg-critical/10 text-critical flex items-center justify-center flex-shrink-0">
@@ -808,6 +961,7 @@ export default function App() {
             </div>
           </div>
 
+          {/* 活跃警报卡片 */}
           <div className="p-4 rounded-xl border border-border bg-bgSurface card-hover">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-lg bg-warning/10 text-warning flex items-center justify-center flex-shrink-0">
@@ -821,6 +975,8 @@ export default function App() {
           </div>
         </div>
 
+        {/* ---------- 标签页导航：概览 / 模型详情 / 警报 / 厂商 ---------- */}
+        {/* 底部边框，4 个标签，activeTab 高亮 */}
         <div className="flex items-center gap-1 mb-6 border-b border-border">
           {[
             { id: 'overview', label: '概览', icon: BarChart3 },
@@ -841,9 +997,13 @@ export default function App() {
           ))}
         </div>
 
+        {/* ---------- 概览标签页内容 ---------- */}
+        {/* 两列布局：左侧 2/3（图表 + 排行榜），右侧 1/3（模型详情/推荐 + 全局趋势 + 退化警报） */}
         {activeTab === 'overview' && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+            {/* 左侧列：图表 + 排行榜 */}
             <div ref={leftColRef} className="lg:col-span-2 space-y-6">
+              {/* 主图表卡片：period 决定展示柱状图或折线图 */}
               <div className="p-5 rounded-xl border border-border bg-bgSurface">
                 <div className="flex items-center justify-between mb-4">
                   <div>
@@ -867,6 +1027,7 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* 历史趋势模式下：模型选择器 */}
                 {period !== 'latest' && (
                   <div className="mb-4 pb-4 border-b border-border/50">
                     <div className="flex items-center justify-between text-[10px] text-textMuted mb-2">
@@ -900,6 +1061,7 @@ export default function App() {
                   </div>
                 )}
 
+                {/* 图表渲染区域：根据 period 和 loading 状态显示不同内容 */}
                 <div className="h-72">
                   {period === 'latest' ? (
                     filteredScores.length > 0 ? (
@@ -927,6 +1089,7 @@ export default function App() {
                 </div>
               </div>
 
+              {/* 排行榜表格：点击行选中模型，展示名称、厂商、得分、趋势、置信区间 */}
               <div className="p-5 rounded-xl border border-border bg-bgSurface">
                 <div className="flex items-center justify-between mb-4">
                   <div>
@@ -972,7 +1135,9 @@ export default function App() {
               </div>
             </div>
 
+            {/* 右侧列：模型详情/智能推荐 + 全局趋势 + 退化警报 */}
             <div className="flex flex-col gap-6" style={leftColHeight ? { height: leftColHeight } : undefined}>
+              {/* 选中模型详情卡片：雷达图 + 6 个核心维度小卡片 */}
               {selectedModelData ? (
                 <div className="p-5 rounded-xl border border-border bg-bgSurface animate-fadeIn">
                   <div className="flex items-center justify-between mb-4">
@@ -1001,6 +1166,7 @@ export default function App() {
                   </div>
                 </div>
               ) : (
+                /* 未选中模型时：智能推荐面板 */
                 <div className="p-5 rounded-xl border border-border bg-bgSurface">
                   <h3 className="font-bold text-sm mb-4 flex items-center gap-2"><Sparkles size={16} className="text-accent" />智能推荐</h3>
                   <div className="space-y-3">
@@ -1049,6 +1215,7 @@ export default function App() {
                 </div>
               )}
 
+              {/* 全局指数趋势图卡片 */}
               <div className="p-5 rounded-xl border border-border bg-bgSurface">
                 <h3 className="font-bold text-sm mb-3">全局指数趋势</h3>
                 <div className="h-32">
@@ -1060,6 +1227,7 @@ export default function App() {
                 </div>
               </div>
 
+              {/* 性能退化警报列表：滚动区域，空状态显示 CheckCircle2 */}
               <div className="p-5 rounded-xl border border-border bg-bgSurface flex-1 flex flex-col min-h-0 overflow-hidden">
                 <h3 className="font-bold text-sm mb-3 flex items-center gap-2 flex-shrink-0"><AlertTriangle size={14} className="text-critical" />性能退化警报</h3>
                 {filteredDegradations.length > 0 ? (

@@ -1,3 +1,6 @@
+// main.go — AI Stupid Dashboard 后端入口
+// 提供模型性能监控仪表盘的 HTTP API 服务。
+// 嵌入前端静态资源，周期性从上游同步评测数据，存入 SQLite。
 package main
 
 import (
@@ -19,29 +22,37 @@ import (
 //go:embed frontend/dist
 var frontendDist embed.FS
 
+// Config 存储运行时配置，当前仅包含被屏蔽的模型列表。
 type Config struct {
 	BlockedModels []string `json:"blocked_models"`
 }
 
 var (
+	// config 保存当前生效的运行时配置，通过 configMu 保护并发安全。
 	config   Config
+	// configMu 读写锁，保护 config 的并发读写。读多写少场景使用 RWMutex 以减少竞争。
 	configMu sync.RWMutex
 )
 
+// loadConfig 从磁盘读取 config.json，若文件不存在或解析失败则使用空配置兜底。
 func loadConfig() {
 	configMu.Lock()
 	defer configMu.Unlock()
 
 	data, err := os.ReadFile("config.json")
 	if err != nil {
+		// 配置文件不存在不影响启动，使用空配置继续运行。
 		config = Config{BlockedModels: []string{}}
 		return
 	}
 	if err := json.Unmarshal(data, &config); err != nil {
+		// JSON 解析失败也使用空配置，避免因配置文件损坏导致服务不可用。
 		config = Config{BlockedModels: []string{}}
 	}
 }
 
+// saveConfigData 将模型列表原子地写入 config.json。
+// 先写入临时文件再 rename，避免写入到一半崩溃导致配置文件损坏。
 func saveConfigData(models []string) error {
 	data, err := json.MarshalIndent(Config{BlockedModels: models}, "", "  ")
 	if err != nil {
@@ -54,6 +65,7 @@ func saveConfigData(models []string) error {
 	return os.Rename(tmp, "config.json")
 }
 
+// saveConfig 是 saveConfigData 的线程安全封装，从 configMu 保护下复制数据后再写入。
 func saveConfig() error {
 	configMu.RLock()
 	models := make([]string, len(config.BlockedModels))
@@ -62,6 +74,7 @@ func saveConfig() error {
 	return saveConfigData(models)
 }
 
+// getBlockedModels 返回被屏蔽模型的副本，调用方无需关心数据竞争。
 func getBlockedModels() []string {
 	configMu.RLock()
 	defer configMu.RUnlock()
@@ -70,18 +83,22 @@ func getBlockedModels() []string {
 	return result
 }
 
+// setBlockedModels 原子地设置被屏蔽模型列表：先写磁盘，失败则回滚内存状态。
 func setBlockedModels(models []string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
 	old := config.BlockedModels
 	config.BlockedModels = models
 	if err := saveConfigData(models); err != nil {
+		// 磁盘写入失败时回滚内存状态，避免内存与磁盘不一致。
 		config.BlockedModels = old
 		return err
 	}
 	return nil
 }
 
+// handleConfig 处理 /api/config 端点。
+// GET 返回当前配置；POST 更新被屏蔽模型列表并返回新配置。
 func handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -97,6 +114,7 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid JSON body", http.StatusBadRequest)
 			return
 		}
+		// 请求中未提供 blocked_models 时使用空列表，避免 setBlockedModels 写入 nil。
 		if body.BlockedModels == nil {
 			body.BlockedModels = []string{}
 		}
@@ -113,6 +131,8 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleModels 返回所有模型的元数据列表，按名称排序。
+// 包含供应商、是否支持推理、是否新模型、是否过期和标准误差等字段。
 func handleModels(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -140,6 +160,7 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		var m Model
 		var isReasoning, isNew, isStale int
 		if err := rows.Scan(&m.ID, &m.Name, &m.Provider, &m.Vendor, &isReasoning, &isNew, &isStale, &m.Status, &m.StandardError); err != nil {
+			// 单行扫描失败则跳过该行，不中断整个请求。
 			continue
 		}
 		m.IsReasoning = isReasoning == 1
@@ -154,6 +175,10 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(models)
 }
 
+// handleScores 返回评分数据。
+// 可选查询参数 period（24h/7d/14d/30d）控制返回时间范围。
+// 不传 period 时返回每个模型的最新"current"评分（含 13 维轴数据）。
+// 传 period 时返回指定天数内的历史评分序列。
 func handleScores(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -173,6 +198,8 @@ func handleScores(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if days == 0 {
+		// period 为空或未识别：返回最新"current"评分快照。
+		// 使用子查询取每个模型 suite='current' 的最新时间戳，保证只返回最新一条记录。
 		type LatestScore struct {
 			ModelID         string   `json:"modelId"`
 			ModelName       string   `json:"modelName"`
@@ -237,6 +264,7 @@ func handleScores(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// period 有值：返回指定天数内的所有评分记录（含所有 suite），按时间升序排列用于绘制折线图。
 	cutoff := time.Now().UTC().AddDate(0, 0, -days)
 	sqlRows, err := DB.Query(`
 		SELECT h.model_id, m.name, h.score, h.timestamp, h.suite,
@@ -272,6 +300,7 @@ func handleScores(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		h.Timestamp = ts.Format(time.RFC3339)
+		// 将 13 维轴数据装入 map，前端可以按需读取。使用 *float64 以便处理 NULL 值。
 		h.Axes = map[string]*float64{
 			"correctness": axCorr, "complexity": axComp, "codeQuality": axQual,
 			"efficiency": axEff, "stability": axStab, "edgeCases": axEdge,
@@ -287,6 +316,7 @@ func handleScores(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(results)
 }
 
+// handleDegradations 返回所有性能退化记录，按降幅百分比降序排列。
 func handleDegradations(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -328,6 +358,7 @@ func handleDegradations(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(results)
 }
 
+// handleAlerts 返回所有告警记录，按检测时间降序排列（最新在前）。
 func handleAlerts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -363,6 +394,7 @@ func handleAlerts(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(results)
 }
 
+// handleGlobalIndex 返回全局生态健康指数的时间序列，最多 100 条，按时间降序。
 func handleGlobalIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -399,6 +431,7 @@ func handleGlobalIndex(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(results)
 }
 
+// handleProviderReliability 返回各供应商的可靠性指标，按信任分数降序排列。
 func handleProviderReliability(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -431,6 +464,7 @@ func handleProviderReliability(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		p.LastIncident = ts.Format(time.RFC3339)
+		// SQLite 存储布尔值为 0/1 整数，需要转换。
 		p.IsAvailable = isAvail == 1
 		results = append(results, p)
 	}
@@ -441,6 +475,7 @@ func handleProviderReliability(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(results)
 }
 
+// handleRecommendations 返回按类别划分的最佳模型推荐列表。
 func handleRecommendations(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -477,6 +512,8 @@ func handleRecommendations(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(results)
 }
 
+// handleTransparency 返回测试覆盖率和数据新鲜度信息。
+// 包含摘要统计和每个模型的新鲜度明细两部分。
 func handleTransparency(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -502,6 +539,7 @@ func handleTransparency(w http.ResponseWriter, r *http.Request) {
 
 	var s Summary
 	var lastUpdate, nextTest time.Time
+	// 查询透明度摘要（只取 id=1 的单行记录）。
 	err := DB.QueryRow(`SELECT last_update, total_tests, passed_tests, coverage, confidence, data_points_24h, next_test, models_fresh, models_stale, models_offline FROM transparency WHERE id = 1`).
 		Scan(&lastUpdate, &s.TotalTests, &s.PassedTests, &s.Coverage, &s.Confidence, &s.DataPoints24h, &nextTest, &s.ModelsFresh, &s.ModelsStale, &s.ModelsOffline)
 	if err == nil {
@@ -509,8 +547,10 @@ func handleTransparency(w http.ResponseWriter, r *http.Request) {
 		s.NextTest = nextTest.Format(time.RFC3339)
 	}
 
+	// 查询各模型新鲜度明细，可独立于摘要行存在。
 	rows, err := DB.Query(`SELECT model_name, last_update, minutes_ago, status FROM model_freshness`)
 	if err != nil {
+		// model_freshness 表可能尚未填充数据，返回空列表不报错。
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"summary":        s,
 			"modelFreshness": []ModelFreshness{},
@@ -536,6 +576,8 @@ func handleTransparency(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleSyncStatus 返回上次同步和下次同步的时间戳。
+// 使用 getLastSyncTime / getNextSyncTime 获取锁保护的时间值。
 func handleSyncStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	lastSync := getLastSyncTime()
@@ -545,10 +587,13 @@ func handleSyncStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// getNextSyncTime 计算下一次同步触发时间（基于当前时间）。
 func getNextSyncTime() time.Time {
 	return getNextSyncTimeAt(time.Now())
 }
 
+// getNextSyncTimeAt 根据指定时间计算下一个整十分钟边界。
+// 同步间隔为 10 分钟，对齐到分钟的整十刻度（如 :00, :10, :20）。
 func getNextSyncTimeAt(now time.Time) time.Time {
 	nextMinute := ((now.Minute() / 10) + 1) * 10
 	if nextMinute >= 60 {
@@ -557,6 +602,8 @@ func getNextSyncTimeAt(now time.Time) time.Time {
 	return time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), nextMinute, 0, 0, now.Location())
 }
 
+// handleManualSync 处理手动触发同步的 POST 请求。
+// 使用 TryFetchAndSync 尝试获取同步锁，若已有同步正在进行则返回 409 Conflict。
 func handleManualSync(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -564,6 +611,7 @@ func handleManualSync(w http.ResponseWriter, r *http.Request) {
 	}
 	acquired, err := TryFetchAndSync()
 	if !acquired {
+		// syncMu 被占用，说明同步正在进行，返回 409 让调用方知晓。
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
 		json.NewEncoder(w).Encode(map[string]string{"error": "sync already in progress"})
@@ -577,6 +625,8 @@ func handleManualSync(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
+// handleModelHistory 返回特定模型的历史评分时间序列。
+// 参数：id（模型 ID，必填）、days（天数，可选，默认 30）。
 func handleModelHistory(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -642,10 +692,14 @@ func handleModelHistory(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(results)
 }
 
+// SetupRoutes 注册所有 API 路由到默认的 http.ServeMux。
+// 数据查询路由和配置路由分别挂载。
 func SetupRoutes() {
+	// 配置和手动同步路由
 	http.HandleFunc("/api/config", handleConfig)
 	http.HandleFunc("/api/sync-now", handleManualSync)
 
+	// 数据查询路由
 	http.HandleFunc("/api/models", handleModels)
 	http.HandleFunc("/api/scores", handleScores)
 	http.HandleFunc("/api/model/history", handleModelHistory)
@@ -658,13 +712,25 @@ func SetupRoutes() {
 	http.HandleFunc("/api/sync-status", handleSyncStatus)
 }
 
+// main 是服务入口函数，依次完成：
+// 1. 加载配置文件
+// 2. 初始化 SQLite 数据库连接
+// 3. 执行首次数据同步（含失败重试）
+// 4. 启动后台周期性同步协程
+// 5. 注册 HTTP 路由
+// 6. 嵌入前端静态文件服务
+// 7. 启动 HTTP 服务器并监听优雅关闭信号
 func main() {
+	// 加载磁盘上的屏蔽模型配置
 	loadConfig()
+	// 初始化 SQLite 数据库，单连接模式以避免并发写入冲突
 	if err := InitDB("./aistupid.db"); err != nil {
 		fmt.Println("InitDB error:", err)
 		return
 	}
 
+	// 首次同步：若失败则以递增间隔重试 3 次（30s / 60s / 120s）。
+	// 重试在后台协程进行，不阻塞服务启动。
 	if err := FetchAndSync(); err != nil {
 		fmt.Println("Initial sync error:", err)
 		go func() {
@@ -680,11 +746,15 @@ func main() {
 		}()
 	}
 
+	// 创建后台同步的上下文，通过 syncCancel 优雅停止。
 	ctx, cancel := context.WithCancel(context.Background())
 	syncCancel = cancel
+	// 启动后台周期同步协程（每 10 分钟一次）
 	go StartSyncWorkerLoop(ctx)
 	SetupRoutes()
 
+	// 从嵌入的 embed.FS 中提取前端打包文件，构建文件服务器。
+	// 对于非 /api 开头的请求，优先尝试返回前端静态文件；文件不存在时回退到 index.html（SPA 支持）。
 	subDist, err := fs.Sub(frontendDist, "frontend/dist")
 	if err != nil {
 		fmt.Println("Frontend embed error:", err)
@@ -705,6 +775,7 @@ func main() {
 		fileServer.ServeHTTP(w, r)
 	}))
 
+	// 配置 HTTP 服务器：仅监听本地回环地址，设置超时防止慢连接耗尽 goroutine。
 	server := &http.Server{
 		Addr:         "127.0.0.1:3223",
 		ReadTimeout:  10 * time.Second,
@@ -712,6 +783,7 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
+	// 优雅关闭：监听 SIGINT/SIGTERM，取消同步上下文后等待请求处理完毕再关闭。
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

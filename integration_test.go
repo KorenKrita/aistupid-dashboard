@@ -9,7 +9,8 @@ import (
 	"time"
 )
 
-// Global variables for mock server control
+// 全局变量，用于在测试间控制 mock HTTP 服务器的响应内容。
+// 通过修改这些变量可以在不同测试场景中模拟不同的上游 API 行为。
 var (
 	integrationMockCachedResponse       string
 	integrationMockAlertsResponse       string
@@ -20,11 +21,17 @@ var (
 	integrationMockCachedStatus         int
 )
 
+// TestIntegrationFlow 端到端集成测试，覆盖完整的同步、查询、更新、清理和错误恢复流程。
+// 使用 mock HTTP 服务器模拟上游 API 的所有端点，在一个测试函数中串联 5 个场景：
+// 1. 完整同步 -> 查询流程
+// 2. 数据一致性验证
+// 3. 更新场景（幂等性、INSERT OR REPLACE、缺陷更新、缺陷删除）
+// 4. 清理场景（旧数据清理、级联删除）
+// 5. 错误恢复（同步失败时事务回滚）
 func TestIntegrationFlow(t *testing.T) {
-	// Initialize mock status
 	integrationMockCachedStatus = http.StatusOK
 
-	// Initialize mock http server
+	// 创建 mock HTTP 服务器，通过全局变量动态切换各端点的响应内容
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -56,12 +63,12 @@ func TestIntegrationFlow(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Direct apiBaseURL to mock server
+	// 将 apiBaseURL 指向 mock 服务器
 	oldBaseURL := apiBaseURL
 	apiBaseURL = server.URL
 	defer func() { apiBaseURL = oldBaseURL }()
 
-	// Use temporary SQLite database for testing
+	// 使用临时的 SQLite 数据库文件运行测试
 	dbPath := "./test_integration_flow.db"
 	defer os.Remove(dbPath)
 	defer CloseDB()
@@ -70,14 +77,15 @@ func TestIntegrationFlow(t *testing.T) {
 		t.Fatalf("InitDB failed: %v", err)
 	}
 
-	// Prepare mock timestamps
+	// 准备 mock 时间戳，用于填充上游 API 响应中的各个时间字段
 	now := time.Now().UTC()
 	nowStr := now.Format(time.RFC3339)
 	oneHourAgo := now.Add(-1 * time.Hour)
 	oneHourAgoStr := oneHourAgo.Format(time.RFC3339)
 	twoHoursAgoStr := now.Add(-2 * time.Hour).Format(time.RFC3339)
 
-	// Set initial mock responses
+	// 设置初始 mock 响应数据：包含 1 个模型、1 条历史分数（含完整 13 个 axis）、1 条退化记录
+	// 模型配置为 isNew=true、usesReasoningEffort=true，用于验证布尔字段解析
 	integrationMockCachedResponse = `{
 		"success": true,
 		"data": {
@@ -152,7 +160,9 @@ func TestIntegrationFlow(t *testing.T) {
 	integrationMockTransparencyResponse = `{"success": true, "data": {"summary": {}, "modelFreshness": []}}`
 
 	// -------------------------------------------------------------
-	// Scenario 1: Full sync to query flow
+	// 场景 1：完整同步 -> 查询流程
+	// 同步数据后分别查询 /api/models、/api/scores、/api/degradations 端点，
+	// 验证各端点返回的数据与上游数据一致。
 	// -------------------------------------------------------------
 	t.Run("Full sync to query flow", func(t *testing.T) {
 		err := FetchAndSync()
@@ -160,7 +170,7 @@ func TestIntegrationFlow(t *testing.T) {
 			t.Fatalf("FetchAndSync failed: %v", err)
 		}
 
-		// Query handleModels
+		// 查询 handleModels，验证模型列表返回 1 条且布尔字段正确
 		reqModels := httptest.NewRequest("GET", "/api/models", nil)
 		recModels := httptest.NewRecorder()
 		handleModels(recModels, reqModels)
@@ -188,7 +198,7 @@ func TestIntegrationFlow(t *testing.T) {
 			t.Error("Expected IsNew to be true")
 		}
 
-		// Query handleScores (latest score)
+		// 查询 handleScores（无 period 参数，默认返回最新分数），验证 score=85 且 axes.correctness=0.85
 		reqScores := httptest.NewRequest("GET", "/api/scores", nil)
 		recScores := httptest.NewRecorder()
 		handleScores(recScores, reqScores)
@@ -219,7 +229,7 @@ func TestIntegrationFlow(t *testing.T) {
 			t.Errorf("Expected axes.correctness to be 0.85, got %+v", latestScores[0].Axes.Correctness)
 		}
 
-		// Query handleScores (with period=24h)
+		// 查询 handleScores?period=24h，期望返回 2 条：历史（score=84, suite=standard）+ 当前（score=85, suite=current）
 		reqScoresHist := httptest.NewRequest("GET", "/api/scores?period=24h", nil)
 		recScoresHist := httptest.NewRecorder()
 		handleScores(recScoresHist, reqScoresHist)
@@ -237,12 +247,12 @@ func TestIntegrationFlow(t *testing.T) {
 		if err := json.Unmarshal(recScoresHist.Body.Bytes(), &scoresHist); err != nil {
 			t.Fatalf("Failed to unmarshal scores history: %v", err)
 		}
-		// Expect 2 points: history (score 84, suite standard) + current (score 85, suite current)
+		// 期望 2 条：history（score=84, suite=standard）+ current（score=85, suite=current）
 		if len(scoresHist) != 2 {
 			t.Errorf("Expected 2 scores history points, got %d: %+v", len(scoresHist), scoresHist)
 		}
 
-		// Query handleDegradations
+		// 查询 handleDegradations，验证退化记录字段正确性
 		reqDegradations := httptest.NewRequest("GET", "/api/degradations", nil)
 		recDegradations := httptest.NewRecorder()
 		handleDegradations(recDegradations, reqDegradations)
@@ -267,10 +277,11 @@ func TestIntegrationFlow(t *testing.T) {
 	})
 
 	// -------------------------------------------------------------
-	// Scenario 2: Data consistency
+	// 场景 2：数据一致性验证
+	// 验证外键关联完整性以及响应 JSON 中时间戳格式的合法性。
 	// -------------------------------------------------------------
 	t.Run("Data consistency", func(t *testing.T) {
-		// 1. Verify model ID relations match between scores_history and models table
+		// 验证 scores_history 与 models 表的外键关联完整性，期望 2 条匹配记录
 		var count int
 		err := DB.QueryRow(`
 			SELECT COUNT(*)
@@ -280,12 +291,11 @@ func TestIntegrationFlow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Database query failed: %v", err)
 		}
-		// We expect 2 matching records in scores_history
 		if count != 2 {
 			t.Errorf("Expected 2 related scores_history entries, got %d", count)
 		}
 
-		// 2. Verify model ID relations match between degradations and models table
+		// 验证 degradations 与 models 表的外键关联完整性，期望 1 条匹配记录
 		err = DB.QueryRow(`
 			SELECT COUNT(*)
 			FROM degradations d
@@ -298,7 +308,7 @@ func TestIntegrationFlow(t *testing.T) {
 			t.Errorf("Expected 1 related degradation entry, got %d", count)
 		}
 
-		// 3. Verify timestamps format in response JSON (must be valid RFC3339)
+		// 验证 scores 响应中的 timestamp 字段符合 RFC3339 格式
 		reqScores := httptest.NewRequest("GET", "/api/scores", nil)
 		recScores := httptest.NewRecorder()
 		handleScores(recScores, reqScores)
@@ -315,6 +325,7 @@ func TestIntegrationFlow(t *testing.T) {
 			}
 		}
 
+		// 验证 degradations 响应中的 detectedAt 字段符合 RFC3339 格式
 		reqDegs := httptest.NewRequest("GET", "/api/degradations", nil)
 		recDegs := httptest.NewRecorder()
 		handleDegradations(recDegs, reqDegs)
@@ -333,10 +344,12 @@ func TestIntegrationFlow(t *testing.T) {
 	})
 
 	// -------------------------------------------------------------
-	// Scenario 3: Update scenarios
+	// 场景 3：更新场景
+	// 覆盖幂等性（重复同步不产生重复记录）、INSERT OR REPLACE 行为、
+	// 缺陷记录更新（detectedAt 保持不变）、以及上游删除后同步清理。
 	// -------------------------------------------------------------
 	t.Run("Update scenarios", func(t *testing.T) {
-		// 1. Sync twice with same data, verify no duplicates
+		// 1. 重复同步相同数据，验证不产生重复记录（幂等性）
 		err := FetchAndSync()
 		if err != nil {
 			t.Fatalf("Second FetchAndSync failed: %v", err)
@@ -357,16 +370,15 @@ func TestIntegrationFlow(t *testing.T) {
 			t.Errorf("Expected 1 degradation, got %d", degsCount)
 		}
 
-		// 2. Verify INSERT OR IGNORE works correctly for scores_history
-		// Manually insert same history point directly, verify no constraint failure
+		// 2. 验证 INSERT OR IGNORE 不会因重复键报错
 		_, err = DB.Exec(`INSERT OR IGNORE INTO scores_history (model_id, timestamp, score, suite)
 			VALUES ('model-integration-1', ?, 84, 'standard')`, oneHourAgo)
 		if err != nil {
 			t.Errorf("Manually inserting duplicate history failed: %v", err)
 		}
 
-		// 3. Verify UPDATE logic for degradations: z_score/severity updates, detected_at stays same
-		// Update mock response with updated degradation details
+		// 3. 验证缺陷更新逻辑：更新 currentScore、dropPercentage、zScore、severity，
+		//    detectedAt 应保留原始值（twoHoursAgoStr）而非更新为新值
 		integrationMockCachedResponse = `{
 			"success": true,
 			"data": {
@@ -448,14 +460,14 @@ func TestIntegrationFlow(t *testing.T) {
 			t.Errorf("Expected updated severity 'high', got %s", severity)
 		}
 
-		// The detectedAt MUST still be twoHoursAgoStr (which we originally passed), NOT the new nowStr!
+		// detectedAt 应保留首次插入时的值 twoHoursAgoStr，而非被新值覆盖
 		parsedDetectedAt, _ := time.Parse(time.RFC3339, detectedAt)
 		expectedDetectedAt, _ := time.Parse(time.RFC3339, twoHoursAgoStr)
 		if !parsedDetectedAt.Equal(expectedDetectedAt) {
 			t.Errorf("Expected detected_at to remain %s, but got %s", twoHoursAgoStr, detectedAt)
 		}
 
-		// 4. Verify removal of degradations no longer in API response
+		// 4. 验证上游删除缺陷记录后，同步时本地应同步删除
 		integrationMockCachedResponse = `{
 			"success": true,
 			"data": {
@@ -476,19 +488,20 @@ func TestIntegrationFlow(t *testing.T) {
 	})
 
 	// -------------------------------------------------------------
-	// Scenario 4: Cleanup scenarios
+	// 场景 4：清理场景
+	// 验证超过 60 天的 scores_history 和 global_index 被自动清理，
+	// 以及外键级联删除（删除 models 行后子表记录自动删除）。
 	// -------------------------------------------------------------
 	t.Run("Cleanup scenarios", func(t *testing.T) {
-		// Prepare old data (>60 days old)
 		oldTime := time.Now().UTC().AddDate(0, 0, -65)
 
-		// Create a model first (if not exists)
+		// 创建一个清理测试模型（INSERT OR IGNORE 避免重复创建）
 		_, err := DB.Exec(`INSERT OR IGNORE INTO models (id, name, provider, vendor) VALUES ('model-cleanup', 'Cleanup Model', 'P', 'V')`)
 		if err != nil {
 			t.Fatalf("Failed to insert cleanup model: %v", err)
 		}
 
-		// Insert history score and global index older than 60 days
+		// 插入 65 天前的旧数据，期望在执行同步时被清理
 		_, err = DB.Exec(`INSERT INTO scores_history (model_id, timestamp, score, suite) VALUES ('model-cleanup', ?, 50, 'old')`, oldTime)
 		if err != nil {
 			t.Fatalf("Failed to insert old score history: %v", err)
@@ -499,26 +512,26 @@ func TestIntegrationFlow(t *testing.T) {
 			t.Fatalf("Failed to insert old global index: %v", err)
 		}
 
-		// Run sync (which triggers pruning)
+		// 执行同步，触发 60 天数据清理
 		err = FetchAndSync()
 		if err != nil {
 			t.Fatalf("Pruning FetchAndSync failed: %v", err)
 		}
 
-		// Verify old records are pruned
+		// 验证旧 scores_history 被清理
 		var count int
 		DB.QueryRow("SELECT COUNT(*) FROM scores_history WHERE suite = 'old'").Scan(&count)
 		if count != 0 {
 			t.Errorf("Expected old score history to be pruned, got %d", count)
 		}
 
+		// 验证旧 global_index 被清理
 		DB.QueryRow("SELECT COUNT(*) FROM global_index WHERE global_score = 40").Scan(&count)
 		if count != 0 {
 			t.Errorf("Expected old global index to be pruned, got %d", count)
 		}
 
-		// Verify cascade delete
-		// Let's insert a score and degradation for model-cleanup
+		// 验证外键级联删除：为 model-cleanup 插入子表记录后删除父表，子表应自动清空
 		_, err = DB.Exec(`INSERT INTO scores_history (model_id, timestamp, score, suite) VALUES ('model-cleanup', ?, 99, 'standard')`, now)
 		if err != nil {
 			t.Fatalf("Failed to insert cascade check score: %v", err)
@@ -530,7 +543,7 @@ func TestIntegrationFlow(t *testing.T) {
 			t.Fatalf("Failed to insert cascade check degradation: %v", err)
 		}
 
-		// Verify they are in DB
+		// 确认子记录已存在
 		DB.QueryRow("SELECT COUNT(*) FROM scores_history WHERE model_id = 'model-cleanup'").Scan(&count)
 		if count == 0 {
 			t.Fatal("Cascade check score was not inserted")
@@ -540,13 +553,13 @@ func TestIntegrationFlow(t *testing.T) {
 			t.Fatal("Cascade check degradation was not inserted")
 		}
 
-		// Delete model-cleanup
+		// 删除父模型
 		_, err = DB.Exec("DELETE FROM models WHERE id = 'model-cleanup'")
 		if err != nil {
 			t.Fatalf("Failed to delete model: %v", err)
 		}
 
-		// Verify scores and degradations deleted
+		// 验证子表记录被级联删除
 		DB.QueryRow("SELECT COUNT(*) FROM scores_history WHERE model_id = 'model-cleanup'").Scan(&count)
 		if count != 0 {
 			t.Errorf("Cascade delete failed: scores_history still has %d records", count)
@@ -558,10 +571,12 @@ func TestIntegrationFlow(t *testing.T) {
 	})
 
 	// -------------------------------------------------------------
-	// Scenario 5: Error recovery (Rollback on error)
+	// 场景 5：错误恢复
+	// 验证上游 API 返回 500 时，FetchAndSync 不修改数据库已有数据
+	// （事务回滚保证数据一致性）。
 	// -------------------------------------------------------------
 	t.Run("Error recovery", func(t *testing.T) {
-		// Populate initial successful state
+		// 先同步成功状态：插入一个模型
 		integrationMockCachedResponse = `{
 			"success": true,
 			"data": {
@@ -588,14 +603,14 @@ func TestIntegrationFlow(t *testing.T) {
 			t.Fatalf("Initial rollback sync failed: %v", err)
 		}
 
-		// Make sure it exists in DB
+		// 确认模型已存在
 		var name string
 		err = DB.QueryRow("SELECT name FROM models WHERE id = 'model-integration-rollback'").Scan(&name)
 		if err != nil || name != "Original Name" {
 			t.Fatalf("Setup verification failed: %v", err)
 		}
 
-		// Modify mock response to have a new name, but configure mock server to return 500
+		// 修改 mock 响应中的数据（name 改为 "Modified Name"），同时让服务器返回 500
 		integrationMockCachedResponse = `{
 			"success": true,
 			"data": {
@@ -618,13 +633,14 @@ func TestIntegrationFlow(t *testing.T) {
 		}`
 		integrationMockCachedStatus = http.StatusInternalServerError
 
-		// Call FetchAndSync, should fail
+		// 执行同步，预期会失败（500 错误）
 		err = FetchAndSync()
 		if err == nil {
 			t.Error("Expected FetchAndSync to fail due to 500 status, but got nil error")
 		}
 
-		// Verify that the database model name was NOT updated to "Modified Name" (rolled back)
+		// 验证数据库中的模型名仍为 "Original Name"，未被更新为 "Modified Name"
+		// 这说明事务回滚生效，部分写入未被提交
 		err = DB.QueryRow("SELECT name FROM models WHERE id = 'model-integration-rollback'").Scan(&name)
 		if err != nil {
 			t.Fatalf("Failed to query model: %v", err)

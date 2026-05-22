@@ -11,8 +11,11 @@ import (
 	"time"
 )
 
+// TestGetSetLastSyncTimeThreadSafe 验证 lastSyncTime 的读写并发安全性。
+// 使用 20 个 goroutine，每个交替执行 1000 次读写操作，确保无 data race。
+// 测试结束后验证读写功能仍然正常。
 func TestGetSetLastSyncTimeThreadSafe(t *testing.T) {
-	// Reset the state
+	// 重置状态
 	setLastSyncTime(time.Time{})
 
 	const goroutines = 20
@@ -25,7 +28,7 @@ func TestGetSetLastSyncTimeThreadSafe(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
-				// Alternating read and write
+				// 交替读写，模拟真实场景下的并发访问模式
 				if j%2 == 0 {
 					setLastSyncTime(time.Now())
 				} else {
@@ -37,7 +40,7 @@ func TestGetSetLastSyncTimeThreadSafe(t *testing.T) {
 
 	wg.Wait()
 
-	// Ensure we can still read and write
+	// 验证并发操作后读写功能仍然正常
 	now := time.Now()
 	setLastSyncTime(now)
 	if getLastSyncTime() != now {
@@ -45,15 +48,18 @@ func TestGetSetLastSyncTimeThreadSafe(t *testing.T) {
 	}
 }
 
+// TestFetchJSONNon200Status 验证 fetchJSON 在 API 返回非 200 状态码时的错误处理。
+// 使用 mock server 返回 500 Internal Server Error，期望 fetchJSON 返回包含
+// "upstream API returned status 500" 的错误。
 func TestFetchJSONNon200Status(t *testing.T) {
-	// Create a test server that returns 500 Internal Server Error
+	// 创建一个返回 500 的 mock 服务器，模拟上游 API 故障
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(`{"success":false,"error":"internal error"}`))
 	}))
 	defer ts.Close()
 
-	// Backup and temporarily change apiBaseURL
+	// 临时替换 apiBaseURL 指向 mock 服务器
 	originalBaseURL := apiBaseURL
 	apiBaseURL = ts.URL
 	defer func() { apiBaseURL = originalBaseURL }()
@@ -70,6 +76,10 @@ func TestFetchJSONNon200Status(t *testing.T) {
 	}
 }
 
+// TestFetchAndSyncPopulatesAllTables 验证 FetchAndSync 能正确填充所有数据库表。
+// 使用 mock HTTP 服务器模拟 6 个上游 API 端点（/dashboard/cached、/dashboard/alerts、
+// /dashboard/global-index、/analytics/provider-reliability、/analytics/recommendations、
+// /analytics/transparency），同步后验证每个表的数据行数和字段正确性。
 func TestFetchAndSyncPopulatesAllTables(t *testing.T) {
 	dbPath := "./test_sync_tables.db"
 	defer os.Remove(dbPath)
@@ -80,7 +90,8 @@ func TestFetchAndSyncPopulatesAllTables(t *testing.T) {
 		t.Fatalf("InitDB failed: %v", err)
 	}
 
-	// Create mockup endpoints for the API responses
+	// 创建 mock 服务器，模拟所有上游 API 端点。
+	// 使用完整的数据集验证同步逻辑：1 个模型 + 1 条历史分数 + 13 个 axis 字段 + 1 条退化记录 + 1 条告警
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -287,7 +298,7 @@ func TestFetchAndSyncPopulatesAllTables(t *testing.T) {
 		t.Fatalf("FetchAndSync failed: %v", err)
 	}
 
-	// Helper to check table count
+	// 辅助函数：验证表中行数是否符合预期
 	checkCount := func(table string, expected int) {
 		var count int
 		err := DB.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", table)).Scan(&count)
@@ -299,6 +310,7 @@ func TestFetchAndSyncPopulatesAllTables(t *testing.T) {
 		}
 	}
 
+	// 验证 9 张表的数据行数
 	checkCount("models", 1)
 	checkCount("scores_history", 1)
 	checkCount("degradations", 1)
@@ -309,7 +321,7 @@ func TestFetchAndSyncPopulatesAllTables(t *testing.T) {
 	checkCount("transparency", 1)
 	checkCount("model_freshness", 1)
 
-	// Verify specific values
+	// 验证模型特定字段是否正确解析：is_reasoning 应反映 usesReasoningEffort
 	var isReasoning int
 	err = DB.QueryRow("SELECT is_reasoning FROM models WHERE id='model-1'").Scan(&isReasoning)
 	if err != nil {
@@ -319,6 +331,7 @@ func TestFetchAndSyncPopulatesAllTables(t *testing.T) {
 		t.Errorf("Expected model-1 to have is_reasoning=1, got %d", isReasoning)
 	}
 
+	// 验证当前分数和历史 axis 字段是否正确插入
 	var score int
 	var axCorrectness float64
 	err = DB.QueryRow("SELECT score, ax_correctness FROM scores_history WHERE model_id='model-1' AND suite='current'").Scan(&score, &axCorrectness)
@@ -333,6 +346,9 @@ func TestFetchAndSyncPopulatesAllTables(t *testing.T) {
 	}
 }
 
+// TestFetchAndSyncIdempotent 验证 FetchAndSync 的幂等性：重复同步相同数据不会产生重复记录。
+// 使用 INSERT OR REPLACE 确保 models 和 scores_history 的行数不变。
+// 验证：第一次同步后 1 条模型 + 1 条分数，第二次同步后仍为 1 + 1。
 func TestFetchAndSyncIdempotent(t *testing.T) {
 	dbPath := "./test_sync_idempotent.db"
 	defer os.Remove(dbPath)
@@ -343,6 +359,7 @@ func TestFetchAndSyncIdempotent(t *testing.T) {
 		t.Fatalf("InitDB failed: %v", err)
 	}
 
+	// mock 服务器返回固定的数据集
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -411,7 +428,7 @@ func TestFetchAndSyncIdempotent(t *testing.T) {
 	apiBaseURL = ts.URL
 	defer func() { apiBaseURL = originalBaseURL }()
 
-	// First sync
+	// 第一次同步
 	err = FetchAndSync()
 	if err != nil {
 		t.Fatalf("First FetchAndSync failed: %v", err)
@@ -429,7 +446,7 @@ func TestFetchAndSyncIdempotent(t *testing.T) {
 		t.Fatalf("Expected 1 score_history row after first sync, got %d", historyCount1)
 	}
 
-	// Second sync
+	// 第二次同步，数据与第一次完全相同，应不会产生重复行
 	err = FetchAndSync()
 	if err != nil {
 		t.Fatalf("Second FetchAndSync failed: %v", err)
@@ -448,6 +465,9 @@ func TestFetchAndSyncIdempotent(t *testing.T) {
 	}
 }
 
+// TestSyncMuPreventsConcurrentFetchAndSync 验证 syncMu 互斥锁阻止并发同步。
+// 策略：第一个 FetchAndSync 在 mock server 中阻塞，第二个 FetchAndSync 应在 100ms 内无法完成。
+// 释放第一个后，两个都应正常结束。
 func TestSyncMuPreventsConcurrentFetchAndSync(t *testing.T) {
 	dbPath := "./test_sync_mu.db"
 	defer os.Remove(dbPath)
@@ -465,13 +485,13 @@ func TestSyncMuPreventsConcurrentFetchAndSync(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/dashboard/cached" {
-			// Signal that sync request has hit the server
+			// 通知测试第一个同步已达到 API 请求阶段
 			select {
 			case syncStarted <- struct{}{}:
 			default:
 			}
 
-			// Block the request handler until we say so, simulating a slow API call
+			// 阻塞请求处理，模拟慢 API 调用，让第二个同步有机会尝试并发执行
 			<-blockSync
 
 			w.WriteHeader(http.StatusOK)
@@ -494,17 +514,16 @@ func TestSyncMuPreventsConcurrentFetchAndSync(t *testing.T) {
 	apiBaseURL = ts.URL
 	defer func() { apiBaseURL = originalBaseURL }()
 
-	// Trigger the first sync in a goroutine
+	// 在 goroutine 中启动第一个同步
 	go func() {
 		_ = FetchAndSync()
 		close(syncFinished)
 	}()
 
-	// Wait for the first sync to be inside fetchJSON
+	// 等待第一个同步进入 fetchJSON 阶段（即 syncMu 已锁定）
 	<-syncStarted
 
-	// Now try to run another FetchAndSync concurrently.
-	// Since syncMu is locked, this should be blocked.
+	// 此时启动第二个同步：由于 syncMu 被锁定，第二个应被阻塞无法执行
 	secondSyncFinished := make(chan struct{})
 	var secondSyncSuccess int32
 
@@ -516,18 +535,18 @@ func TestSyncMuPreventsConcurrentFetchAndSync(t *testing.T) {
 		close(secondSyncFinished)
 	}()
 
-	// Give the second sync goroutine a small amount of time to run and block
+	// 给第二个 goroutine 一小段时间运行，期望它被 syncMu 阻塞
 	select {
 	case <-secondSyncFinished:
 		t.Fatal("Second FetchAndSync completed while first one was still blocked!")
 	case <-time.After(100 * time.Millisecond):
-		// This is the expected path: it's blocked.
+		// 预期路径：第二个同步被阻塞，100ms 后仍未完成
 	}
 
-	// Release the first sync
+	// 释放第一个同步，使其完成
 	close(blockSync)
 
-	// Wait for both to finish
+	// 等待两个同步都完成
 	<-syncFinished
 	<-secondSyncFinished
 
@@ -536,6 +555,11 @@ func TestSyncMuPreventsConcurrentFetchAndSync(t *testing.T) {
 	}
 }
 
+// TestDataPruningWorks 验证同步过程中的数据清理逻辑：
+// 1. 先插入一条 10 天前和一条 65 天前的 scores_history 记录
+// 2. 再插入相应时间的 global_index 记录
+// 3. 执行 FetchAndSync（触发 60 天数据清理）
+// 4. 验证旧数据被删除，新数据保留
 func TestDataPruningWorks(t *testing.T) {
 	dbPath := "./test_pruning.db"
 	defer os.Remove(dbPath)
@@ -546,7 +570,7 @@ func TestDataPruningWorks(t *testing.T) {
 		t.Fatalf("InitDB failed: %v", err)
 	}
 
-	// Mock server to return minimal data
+	// mock 服务器返回最小化数据，确保同步成功但不产生干扰数据
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/dashboard/cached" {
@@ -563,16 +587,17 @@ func TestDataPruningWorks(t *testing.T) {
 	apiBaseURL = ts.URL
 	defer func() { apiBaseURL = originalBaseURL }()
 
-	// Add dummy models so foreign keys constraint doesn't fail
+	// 插入一个 dummy 模型以满足外键约束
 	_, err = DB.Exec(`INSERT INTO models (id, name, provider, vendor) VALUES ('model-1', 'Model One', 'openai', 'openai')`)
 	if err != nil {
 		t.Fatalf("Failed to insert dummy model: %v", err)
 	}
 
-	// Insert custom old and new score history & global index records manually
+	// 手动插入旧的和新的 scores_history 和 global_index 记录
+	// 选择 10 天前（保留）和 65 天前（超过 60 天清理阈值）
 	now := time.Now()
-	recentTime := now.AddDate(0, 0, -10) // 10 days ago
-	oldTime := now.AddDate(0, 0, -65)    // 65 days ago (older than 60 days cutoff)
+	recentTime := now.AddDate(0, 0, -10) // 10 天前，应保留
+	oldTime := now.AddDate(0, 0, -65)    // 65 天前，应被清理
 
 	_, err = DB.Exec(`INSERT INTO scores_history (model_id, timestamp, score, suite) VALUES
 		('model-1', ?, 80, 'test'),
@@ -588,13 +613,13 @@ func TestDataPruningWorks(t *testing.T) {
 		t.Fatalf("Failed to insert mock global index: %v", err)
 	}
 
-	// Run FetchAndSync to trigger pruning
+	// 执行 FetchAndSync，触发数据清理
 	err = FetchAndSync()
 	if err != nil {
 		t.Fatalf("FetchAndSync failed: %v", err)
 	}
 
-	// Check if old history was pruned, but recent history remains
+	// 验证 scores_history：旧数据被清理，新数据保留
 	var count int
 	err = DB.QueryRow("SELECT COUNT(*) FROM scores_history WHERE timestamp = ?", oldTime).Scan(&count)
 	if err != nil {
@@ -612,7 +637,7 @@ func TestDataPruningWorks(t *testing.T) {
 		t.Errorf("Expected recent score_history record to remain, but found %d", count)
 	}
 
-	// Check if old global index was pruned
+	// 验证 global_index：旧数据被清理，新数据保留
 	err = DB.QueryRow("SELECT COUNT(*) FROM global_index WHERE timestamp = ?", oldTime).Scan(&count)
 	if err != nil {
 		t.Fatalf("Query failed: %v", err)
@@ -630,6 +655,11 @@ func TestDataPruningWorks(t *testing.T) {
 	}
 }
 
+// TestStartSyncWorkerLoop 测试定时同步循环的调度逻辑，而非实际的循环执行。
+// 由于 StartSyncWorkerLoop 会永久循环并调用 time.Sleep（最长 10 分钟），
+// 直接调用会导致测试挂起。替代方案：
+// 1. 复现内部调度算法，验证不同时间点的睡眠时长计算正确性
+// 2. 验证边界情况：整点边界（59 分 -> 跨小时）、整 10 分钟（0 分 -> 10 分）、常规情况
 func TestStartSyncWorkerLoop(t *testing.T) {
 	dbPath := "./test_worker_loop.db"
 	defer os.Remove(dbPath)
@@ -658,42 +688,7 @@ func TestStartSyncWorkerLoop(t *testing.T) {
 	apiBaseURL = ts.URL
 	defer func() { apiBaseURL = originalBaseURL }()
 
-	// We want to test StartSyncWorkerLoop without blocking forever.
-	// However, StartSyncWorkerLoop sleeps until the next 10-minute boundary.
-	// Since we can't easily hijack time.Sleep without modifying the original code,
-	// let's run it in a short timeout context or use a mock approach if possible.
-	// Wait, the specification says:
-	// "StartSyncWorkerLoop() - runs sync every 10 minutes"
-	// Let's look at the implementation of StartSyncWorkerLoop:
-	// func StartSyncWorkerLoop() {
-	//    for {
-	//       now := time.Now()
-	//       nextMinute := ((now.Minute() / 10) + 1) * 10
-	//       ...
-	//       sleepDuration := nextSync.Sub(now)
-	//       if sleepDuration > 0 {
-	//           time.Sleep(sleepDuration)
-	//       }
-	//       if err := FetchAndSync(); err != nil { ... }
-	//    }
-	// }
-	//
-	// This function runs forever and calls time.Sleep.
-	// Since we don't want tests to hang or sleep for minutes, we can run StartSyncWorkerLoop
-	// in a separate goroutine and cancel/kill the test quickly, but we also want to verify it does something.
-	// Wait, we can test it with a timeout, or we can check the logic itself.
-	// Let's run it with a timeout to verify it runs and starts sleeping. Since the sleep time is calculated
-	// dynamically, it's typically between 0 and 10 minutes.
-	// We can use a separate goroutine to run it and verify that it compiles and starts.
-	// Wait! What if we can mock time or run it in a way that doesn't sleep?
-	// Go does not have a clean way to mock time.Sleep unless we override a package variable or pass a channel/duration helper.
-	// But let's check: since we cannot modify sync.go to add test hooks if we want to follow "Surgical Changes: don't refactor things that aren't broken",
-	// we shouldn't modify sync.go's StartSyncWorkerLoop just to make it testable, unless necessary.
-	// Let's run it in a goroutine, wait a tiny bit to make sure it doesn't panic on startup, and check that it's running.
-	// Wait, we can also write a test that verifies the calculation logic of nextSync by recreating the calculation logic and verifying its correctness!
-	// Let's do that!
-
-	// Test the math in StartSyncWorkerLoop
+	// 复现 StartSyncWorkerLoop 内部的调度算法来计算下一次同步的等待时间
 	calculateSleepDuration := func(now time.Time) time.Duration {
 		nextMinute := ((now.Minute() / 10) + 1) * 10
 		var nextSync time.Time
@@ -705,35 +700,33 @@ func TestStartSyncWorkerLoop(t *testing.T) {
 		return nextSync.Sub(now)
 	}
 
-	// Case 1: 12:03:00 -> should sleep 7 minutes
+	// Case 1: 12:03:00 -> 应等待 7 分钟到 12:10
 	t1 := time.Date(2026, 5, 22, 12, 3, 0, 0, time.UTC)
 	d1 := calculateSleepDuration(t1)
 	if d1 != 7*time.Minute {
 		t.Errorf("Expected 7 minutes sleep from 12:03:00, got %v", d1)
 	}
 
-	// Case 2: 12:59:00 -> should sleep 1 minute (to 13:00:00)
+	// Case 2: 12:59:00 -> 应等待 1 分钟到 13:00（跨小时边界）
 	t2 := time.Date(2026, 5, 22, 12, 59, 0, 0, time.UTC)
 	d2 := calculateSleepDuration(t2)
 	if d2 != 1*time.Minute {
 		t.Errorf("Expected 1 minute sleep from 12:59:00, got %v", d2)
 	}
 
-	// Case 3: 12:00:00 -> should sleep 10 minutes (to 12:10:00)
+	// Case 3: 12:00:00 -> 应等待 10 分钟到 12:10（整 10 分时的行为）
 	t3 := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	d3 := calculateSleepDuration(t3)
 	if d3 != 10*time.Minute {
 		t.Errorf("Expected 10 minutes sleep from 12:00:00, got %v", d3)
 	}
 
-	// Run the loop in a background goroutine for a split second to ensure it doesn't panic on startup
+	// 在后台 goroutine 中启动循环以确保不会 panic（但不实际运行，因为会永久阻塞）
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				t.Errorf("StartSyncWorkerLoop panicked: %v", r)
 			}
 		}()
-		// Note: We don't actually call StartSyncWorkerLoop() here because it would block forever and keep the goroutine alive.
-		// The math tests already verify the main logic of the loop.
 	}()
 }
