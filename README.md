@@ -48,6 +48,27 @@ go test main.go db.go sync.go time_test.go
 cd frontend && npm run test:run
 ```
 
+## 交叉编译
+
+单二进制部署，使用纯 Go SQLite 驱动，无需 CGO，交叉编译无额外依赖。
+
+```bash
+# 先构建前端（嵌入到二进制中）
+cd frontend && npm run build && cd ..
+
+# Linux amd64
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags '-s -w' -o aistupid-dashboard-linux-amd64
+
+# Linux arm64
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags '-s -w' -o aistupid-dashboard-linux-arm64
+
+# macOS arm64（Apple Silicon）
+go build -o aistupid-dashboard-darwin-arm64
+
+# macOS amd64（Intel）
+GOARCH=amd64 go build -o aistupid-dashboard-darwin-amd64
+```
+
 ## 数据同步
 
 启动时自动从 `aistupidlevel.info` 拉取数据，之后每 10 分钟同步一次。超过 60 天的历史数据自动清理。
