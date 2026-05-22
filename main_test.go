@@ -11,6 +11,7 @@ import (
 func TestMainAPI(t *testing.T) {
 	dbPath := "./test_main.db"
 	defer os.Remove(dbPath)
+	defer CloseDB()
 
 	err := InitDB(dbPath)
 	if err != nil {

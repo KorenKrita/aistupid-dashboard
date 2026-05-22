@@ -191,6 +191,10 @@ func fetchJSON(path string, target interface{}) error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("upstream API returned status %d", resp.StatusCode)
+	}
+
 	return json.NewDecoder(resp.Body).Decode(target)
 }
 
@@ -247,16 +251,23 @@ func FetchAndSync() error {
 				continue
 			}
 			axes := pt.Axes
-			_, _ = tx.Exec(`INSERT OR IGNORE INTO scores_history
-				(model_id, timestamp, score, stupid_score, trend, confidence_lower, confidence_upper, suite,
-				ax_correctness, ax_complexity, ax_code_quality, ax_efficiency, ax_stability,
-				ax_edge_cases, ax_debugging, ax_format, ax_safety,
-				ax_memory_retention, ax_hallucination_rate, ax_plan_coherence, ax_context_window)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				modelID, ts, pt.Score, pt.StupidScore, trend, conf[0], conf[1], pt.Suite,
-				axes["correctness"], axes["complexity"], axes["codeQuality"], axes["efficiency"], axes["stability"],
-				axes["edgeCases"], axes["debugging"], axes["format"], axes["safety"],
-				axes["memoryRetention"], axes["hallucinationRate"], axes["planCoherence"], axes["contextWindow"])
+			if axes == nil {
+				_, _ = tx.Exec(`INSERT OR IGNORE INTO scores_history
+					(model_id, timestamp, score, stupid_score, trend, confidence_lower, confidence_upper, suite)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+					modelID, ts, pt.Score, pt.StupidScore, trend, conf[0], conf[1], pt.Suite)
+			} else {
+				_, _ = tx.Exec(`INSERT OR IGNORE INTO scores_history
+					(model_id, timestamp, score, stupid_score, trend, confidence_lower, confidence_upper, suite,
+					ax_correctness, ax_complexity, ax_code_quality, ax_efficiency, ax_stability,
+					ax_edge_cases, ax_debugging, ax_format, ax_safety,
+					ax_memory_retention, ax_hallucination_rate, ax_plan_coherence, ax_context_window)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					modelID, ts, pt.Score, pt.StupidScore, trend, conf[0], conf[1], pt.Suite,
+					axes["correctness"], axes["complexity"], axes["codeQuality"], axes["efficiency"], axes["stability"],
+					axes["edgeCases"], axes["debugging"], axes["format"], axes["safety"],
+					axes["memoryRetention"], axes["hallucinationRate"], axes["planCoherence"], axes["contextWindow"])
+			}
 		}
 	}
 
@@ -313,7 +324,7 @@ func FetchAndSync() error {
 		// Parse API-provided detection time, fallback to now if invalid
 		detectedAt, err := time.Parse(time.RFC3339, d.DetectedAt)
 		if err != nil {
-			detectedAt = time.Now()
+			detectedAt = time.Now().UTC()
 		}
 
 		// INSERT OR IGNORE keeps the first detected_at

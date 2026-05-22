@@ -8,6 +8,7 @@ import (
 func TestInitDB(t *testing.T) {
 	dbPath := "./test_aistupid.db"
 	defer os.Remove(dbPath)
+	defer CloseDB()
 
 	err := InitDB(dbPath)
 	if err != nil {

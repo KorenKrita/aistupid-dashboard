@@ -8,6 +8,7 @@ import (
 func TestFetchAndSync(t *testing.T) {
 	dbPath := "./test_sync.db"
 	defer os.Remove(dbPath)
+	defer CloseDB()
 
 	err := InitDB(dbPath)
 	if err != nil {

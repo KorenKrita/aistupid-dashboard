@@ -53,7 +53,9 @@ func saveConfig() error {
 func getBlockedModels() []string {
 	configMu.RLock()
 	defer configMu.RUnlock()
-	return config.BlockedModels
+	result := make([]string, len(config.BlockedModels))
+	copy(result, config.BlockedModels)
+	return result
 }
 
 func setBlockedModels(models []string) {
@@ -75,7 +77,7 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := DB.Query(`SELECT id, name, provider, vendor, is_reasoning, is_new, is_stale, status, standard_error FROM models ORDER BY name`)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -185,7 +187,7 @@ func handleScores(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cutoff := time.Now().AddDate(0, 0, -days)
+	cutoff := time.Now().UTC().AddDate(0, 0, -days)
 	sqlRows, err := DB.Query(`
 		SELECT h.model_id, m.name, h.score, h.timestamp, h.suite,
 			h.ax_correctness, h.ax_complexity, h.ax_code_quality, h.ax_efficiency, h.ax_stability,
@@ -196,7 +198,7 @@ func handleScores(w http.ResponseWriter, r *http.Request) {
 		WHERE h.timestamp >= ?
 		ORDER BY h.timestamp ASC`, cutoff)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 	defer sqlRows.Close()
@@ -236,7 +238,7 @@ func handleDegradations(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := DB.Query(`SELECT model_id, model_name, provider, current_score, baseline_score, drop_percentage, z_score, severity, detected_at, message, type FROM degradations ORDER BY drop_percentage DESC`)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -273,7 +275,7 @@ func handleAlerts(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := DB.Query(`SELECT model_name, provider, issue, severity, detected_at FROM alerts ORDER BY detected_at DESC`)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -304,7 +306,7 @@ func handleGlobalIndex(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := DB.Query(`SELECT timestamp, global_score, models_count, trend, performing_well, total_models FROM global_index ORDER BY timestamp DESC LIMIT 100`)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -336,7 +338,7 @@ func handleProviderReliability(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := DB.Query(`SELECT provider, trust_score, total_incidents, incidents_per_month, avg_recovery_hours, last_incident, trend, active_models, top_performers, is_available FROM provider_reliability ORDER BY trust_score DESC`)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -374,7 +376,7 @@ func handleRecommendations(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := DB.Query(`SELECT type, model_id, model_name, vendor, score, reason, evidence, extra_data FROM recommendations`)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -479,9 +481,13 @@ func getNextSyncTime() time.Time {
 }
 
 func handleManualSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	err := FetchAndSync()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Sync failed", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -503,7 +509,7 @@ func handleModelHistory(w http.ResponseWriter, r *http.Request) {
 		days = 30
 	}
 
-	cutoff := time.Now().AddDate(0, 0, -days)
+	cutoff := time.Now().UTC().AddDate(0, 0, -days)
 	rows, err := DB.Query(`
 		SELECT timestamp, score, stupid_score, suite, confidence_lower, confidence_upper,
 			ax_correctness, ax_complexity, ax_code_quality, ax_efficiency, ax_stability,
@@ -513,7 +519,7 @@ func handleModelHistory(w http.ResponseWriter, r *http.Request) {
 		WHERE model_id = ? AND timestamp >= ?
 		ORDER BY timestamp ASC`, modelID, cutoff)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()

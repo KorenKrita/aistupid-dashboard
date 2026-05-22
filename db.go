@@ -151,3 +151,10 @@ func InitDB(filepath string) error {
 
 	return nil
 }
+
+func CloseDB() error {
+	if DB != nil {
+		return DB.Close()
+	}
+	return nil
+}
