@@ -179,6 +179,7 @@ export default function App() {
   const [detailModel, setDetailModel] = useState<string | null>(null);
   const [detailAxis, setDetailAxis] = useState<string>('score');
   const [modelHistory, setModelHistory] = useState<HistoryPoint[]>([]);
+  const [isLoadingModelHistory, setIsLoadingModelHistory] = useState(false);
   const [leftColHeight, setLeftColHeight] = useState<number | null>(null);
   const leftColRef = useRef<HTMLDivElement>(null);
 
@@ -286,7 +287,10 @@ export default function App() {
         const res = await fetch('/api/config', { signal: controller.signal });
         const data = await res.json();
         setBlockedModels(data.blocked_models || []);
-      } catch {}
+      } catch (e) {
+        if (e instanceof DOMException && e.name === 'AbortError') return;
+        console.error('Config poll error:', e);
+      }
     }, 5000);
     return () => {
       controller.abort();
@@ -598,11 +602,14 @@ export default function App() {
   };
 
   const toggleCompareModel = (modelId: string) => {
-    if (compareModels.includes(modelId)) {
-      setCompareModels(compareModels.filter(id => id !== modelId));
-    } else if (compareModels.length < 3) {
-      setCompareModels([...compareModels, modelId]);
-    }
+    setCompareModels(prev => {
+      if (prev.includes(modelId)) {
+        return prev.filter(id => id !== modelId);
+      } else if (prev.length < 3) {
+        return [...prev, modelId];
+      }
+      return prev;
+    });
   };
 
   const modelHistoryAbortRef = useRef<AbortController | null>(null);
@@ -613,6 +620,7 @@ export default function App() {
     }
     const controller = new AbortController();
     modelHistoryAbortRef.current = controller;
+    setIsLoadingModelHistory(true);
     try {
       const res = await fetch(`/api/model/history?id=${modelId}&days=30`, { signal: controller.signal });
       const data = await res.json();
@@ -623,6 +631,8 @@ export default function App() {
       if (e instanceof DOMException && e.name === 'AbortError') return;
       console.error('Fetch model history error:', e);
       setModelHistory([]);
+    } finally {
+      setIsLoadingModelHistory(false);
     }
   };
 
@@ -633,6 +643,10 @@ export default function App() {
   };
 
   const closeModelDetail = () => {
+    if (modelHistoryAbortRef.current) {
+      modelHistoryAbortRef.current.abort();
+      modelHistoryAbortRef.current = null;
+    }
     setDetailModel(null);
     setModelHistory([]);
   };
@@ -765,7 +779,7 @@ export default function App() {
               </div>
               <div>
                 <div className="text-[10px] text-textMuted font-medium">全局智能指数</div>
-                <div className="text-xl font-bold">{currentGlobal?.globalScore || '-'}<span className="text-sm font-normal text-textMuted ml-1">分</span></div>
+                <div className="text-xl font-bold">{currentGlobal?.globalScore ?? '-'}<span className="text-sm font-normal text-textMuted ml-1">分</span></div>
               </div>
             </div>
           </div>
@@ -904,7 +918,7 @@ export default function App() {
                       请选择要展示的模型
                     </div>
                   ) : filteredHistory.length > 0 ? (
-                    <ReactECharts key={`${period}-${visibleModels.join(',')}`} option={historyChartOptions} style={{ height: '100%', width: '100%' }} notMerge={true} />
+                    <ReactECharts option={historyChartOptions} style={{ height: '100%', width: '100%' }} notMerge={true} />
                   ) : (
                     <div className="flex items-center justify-center h-full text-textMuted text-sm">
                       所选模型暂无历史数据
@@ -1114,12 +1128,16 @@ export default function App() {
                     })}
                   </div>
                   <div className="h-64">
-                    {modelHistory.length > 0 ? (() => {
+                    {isLoadingModelHistory ? (
+                      <div className="flex items-center justify-center h-full text-textMuted text-sm">
+                        <Activity className="animate-spin mr-2" size={16} /> 加载历史数据...
+                      </div>
+                    ) : modelHistory.length > 0 ? (() => {
                       const chartOpts = getModelDetailChartOptions();
                       return chartOpts ? <ReactECharts key={`${detailModel}-${detailAxis}`} option={chartOpts} style={{ height: '100%', width: '100%' }} notMerge={true} /> : null;
                     })() : (
                       <div className="flex items-center justify-center h-full text-textMuted text-sm">
-                        <Activity className="animate-spin mr-2" size={16} /> 加载历史数据...
+                        暂无历史数据
                       </div>
                     )}
                   </div>

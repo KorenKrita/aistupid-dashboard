@@ -330,11 +330,15 @@ func fetchAndSyncLocked() error {
 		var axes map[string]float64
 		if points, ok := cached.Data.HistoryMap[m.ID]; ok && len(points) > 0 {
 			latest := points[0]
+			latestTime, _ := time.Parse(time.RFC3339, latest.Timestamp)
 			for _, pt := range points[1:] {
-				ptTime, _ := time.Parse(time.RFC3339, pt.Timestamp)
-				latestTime, _ := time.Parse(time.RFC3339, latest.Timestamp)
+				ptTime, err := time.Parse(time.RFC3339, pt.Timestamp)
+				if err != nil {
+					continue
+				}
 				if ptTime.After(latestTime) {
 					latest = pt
+					latestTime = ptTime
 				}
 			}
 			axes = latest.Axes
@@ -372,7 +376,7 @@ func fetchAndSyncLocked() error {
 				axes["memoryRetention"], axes["hallucinationRate"], axes["planCoherence"], axes["contextWindow"])
 		}
 		if err != nil {
-			fmt.Printf("Warning: insert current score %s: %v\n", m.ID, err)
+			return fmt.Errorf("insert current score %s: %w", m.ID, err)
 		}
 	}
 
@@ -404,7 +408,8 @@ func fetchAndSyncLocked() error {
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(model_id, type, message) DO UPDATE SET
 			current_score=excluded.current_score, baseline_score=excluded.baseline_score,
-			drop_percentage=excluded.drop_percentage, z_score=excluded.z_score, severity=excluded.severity`,
+			drop_percentage=excluded.drop_percentage, z_score=excluded.z_score, severity=excluded.severity,
+			model_name=excluded.model_name, provider=excluded.provider`,
 			modelIDStr, d.ModelName, d.Provider, d.CurrentScore, d.BaselineScore, d.DropPercentage, d.ZScore, d.Severity, detectedAt, d.Message, d.Type)
 	}
 
@@ -431,8 +436,10 @@ func fetchAndSyncLocked() error {
 		_, _ = tx.Exec("DELETE FROM alerts")
 		for _, a := range alertsResp.Data {
 			detectedAt, _ := time.Parse(time.RFC3339, a.DetectedAt)
-			_, _ = tx.Exec(`INSERT INTO alerts (model_name, provider, issue, severity, detected_at)
-				VALUES (?, ?, ?, ?, ?)`, a.Name, a.Provider, a.Issue, a.Severity, detectedAt)
+			if _, err := tx.Exec(`INSERT INTO alerts (model_name, provider, issue, severity, detected_at)
+				VALUES (?, ?, ?, ?, ?)`, a.Name, a.Provider, a.Issue, a.Severity, detectedAt); err != nil {
+				return fmt.Errorf("insert alert: %w", err)
+			}
 		}
 	}
 
@@ -523,8 +530,12 @@ func fetchAndSyncLocked() error {
 
 	// Prune old data (60 days)
 	cutoff := time.Now().UTC().AddDate(0, 0, -60)
-	_, _ = tx.Exec("DELETE FROM scores_history WHERE timestamp < ?", cutoff)
-	_, _ = tx.Exec("DELETE FROM global_index WHERE timestamp < ?", cutoff)
+	if _, err := tx.Exec("DELETE FROM scores_history WHERE timestamp < ?", cutoff); err != nil {
+		fmt.Printf("Warning: prune scores_history: %v\n", err)
+	}
+	if _, err := tx.Exec("DELETE FROM global_index WHERE timestamp < ?", cutoff); err != nil {
+		fmt.Printf("Warning: prune global_index: %v\n", err)
+	}
 
 	if err := tx.Commit(); err != nil {
 		return err

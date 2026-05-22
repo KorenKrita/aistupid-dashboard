@@ -54,6 +54,14 @@ func saveConfigData(models []string) error {
 	return os.Rename(tmp, "config.json")
 }
 
+func saveConfig() error {
+	configMu.RLock()
+	models := make([]string, len(config.BlockedModels))
+	copy(models, config.BlockedModels)
+	configMu.RUnlock()
+	return saveConfigData(models)
+}
+
 func getBlockedModels() []string {
 	configMu.RLock()
 	defer configMu.RUnlock()
@@ -139,6 +147,10 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		m.IsStale = isStale == 1
 		models = append(models, m)
 	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
 	json.NewEncoder(w).Encode(models)
 }
 
@@ -217,6 +229,10 @@ func handleScores(w http.ResponseWriter, r *http.Request) {
 			s.Timestamp = ts.Format(time.RFC3339)
 			results = append(results, s)
 		}
+		if err := sqlRows.Err(); err != nil {
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
 		json.NewEncoder(w).Encode(results)
 		return
 	}
@@ -229,7 +245,7 @@ func handleScores(w http.ResponseWriter, r *http.Request) {
 			h.ax_memory_retention, h.ax_hallucination_rate, h.ax_plan_coherence, h.ax_context_window
 		FROM scores_history h
 		JOIN models m ON h.model_id = m.id
-		WHERE h.timestamp >= ? AND h.suite != 'current'
+		WHERE h.timestamp >= ?
 		ORDER BY h.timestamp ASC`, cutoff)
 	if err != nil {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -263,6 +279,10 @@ func handleScores(w http.ResponseWriter, r *http.Request) {
 			"memoryRetention": axMem, "hallucinationRate": axHall, "planCoherence": axPlan, "contextWindow": axCtx,
 		}
 		results = append(results, h)
+	}
+	if err := sqlRows.Err(); err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
 	}
 	json.NewEncoder(w).Encode(results)
 }
@@ -301,6 +321,10 @@ func handleDegradations(w http.ResponseWriter, r *http.Request) {
 		d.DetectedAt = ts.Format(time.RFC3339)
 		results = append(results, d)
 	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
 	json.NewEncoder(w).Encode(results)
 }
 
@@ -331,6 +355,10 @@ func handleAlerts(w http.ResponseWriter, r *http.Request) {
 		}
 		a.DetectedAt = ts.Format(time.RFC3339)
 		results = append(results, a)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
 	}
 	json.NewEncoder(w).Encode(results)
 }
@@ -363,6 +391,10 @@ func handleGlobalIndex(w http.ResponseWriter, r *http.Request) {
 		}
 		g.Timestamp = ts.Format(time.RFC3339)
 		results = append(results, g)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
 	}
 	json.NewEncoder(w).Encode(results)
 }
@@ -402,6 +434,10 @@ func handleProviderReliability(w http.ResponseWriter, r *http.Request) {
 		p.IsAvailable = isAvail == 1
 		results = append(results, p)
 	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
 	json.NewEncoder(w).Encode(results)
 }
 
@@ -433,6 +469,10 @@ func handleRecommendations(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		results = append(results, rec)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
 	}
 	json.NewEncoder(w).Encode(results)
 }
@@ -559,7 +599,7 @@ func handleModelHistory(w http.ResponseWriter, r *http.Request) {
 			ax_edge_cases, ax_debugging, ax_format, ax_safety,
 			ax_memory_retention, ax_hallucination_rate, ax_plan_coherence, ax_context_window
 		FROM scores_history
-		WHERE model_id = ? AND timestamp >= ? AND suite != 'current'
+		WHERE model_id = ? AND timestamp >= ?
 		ORDER BY timestamp ASC`, modelID, cutoff)
 	if err != nil {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -594,6 +634,10 @@ func handleModelHistory(w http.ResponseWriter, r *http.Request) {
 			"memoryRetention": axMem, "hallucinationRate": axHall, "planCoherence": axPlan, "contextWindow": axCtx,
 		}
 		results = append(results, h)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
 	}
 	json.NewEncoder(w).Encode(results)
 }
