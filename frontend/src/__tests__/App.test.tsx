@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import App from '../App'
-import React from 'react'
 
 // Mock echarts-for-react to prevent canvas rendering issues in jsdom and inspect chart options
 vi.mock('echarts-for-react', () => {
@@ -193,7 +192,7 @@ const mockConfig = {
 
 // Mock fetch globally
 const mockFetch = vi.fn()
-global.fetch = mockFetch
+globalThis.fetch = mockFetch as typeof fetch
 
 const defaultMockFetchImplementation = (url: string) => {
   if (url.includes('/api/config')) {
