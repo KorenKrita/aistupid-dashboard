@@ -177,10 +177,17 @@ const MODEL_COLORS = [
  * 数据流：
  * 1. 组件挂载时通过 fetchAll 加载所有初始数据
  * 2. 每 5 秒轮询 /api/config 获取阻塞列表
- * 3. period 变化时通过 fetchHistory 加载历史评分
- * 4. 点击模型通过 fetchModelHistory 加载单个模型近30天历史
- * 5. useMemo 对原始数据做过滤、排序和图表配置派生
+ * 3. 每 45 秒轮询 /api/sync-status；lastSync 变化时自动 refreshAfterBackendSync
+ * 4. 标签页重新可见时立即检查 sync-status；nextSync 后 60 秒兜底检查一次
+ * 5. period 变化时通过 fetchHistory 加载历史评分
+ * 6. 点击模型通过 fetchModelHistory 加载单个模型近30天历史
+ * 7. useMemo 对原始数据做过滤、排序和图表配置派生
  */
+
+/** 轮询 sync-status 的间隔（毫秒） */
+const SYNC_POLL_INTERVAL_MS = 45_000;
+/** nextSync 之后的兜底检查延迟（毫秒） */
+const SYNC_FALLBACK_DELAY_MS = 60_000;
 export default function App() {
   // 主题切换状态：从 localStorage 恢复，或跟随系统偏好
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -208,6 +215,8 @@ export default function App() {
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   // 同步状态（上次/下次同步时间）
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+  // 前端数据最近一次刷新时间（用于 header 展示）
+  const [dataUpdatedAt, setDataUpdatedAt] = useState<Date | null>(null);
 
   // ---------- UI 交互状态 ----------
   // 时间范围选择：latest / 24h / 7d / 14d / 30d
@@ -242,6 +251,12 @@ export default function App() {
   const [leftColHeight, setLeftColHeight] = useState<number | null>(null);
   // 左侧列 DOM 引用（用于 ResizeObserver 测量高度）
   const leftColRef = useRef<HTMLDivElement>(null);
+  // 已知的后端 lastSync，用于检测定时同步是否完成
+  const knownLastSyncRef = useRef<string | null>(null);
+  // 详情弹窗中的模型 ID（供轮询回调读取最新值）
+  const detailModelRef = useRef<string | null>(null);
+  // 模型详情历史请求的 AbortController 引用
+  const modelHistoryAbortRef = useRef<AbortController | null>(null);
 
   // 使用 ResizeObserver 监听左侧列高度变化，同步设置右侧列高度以实现两列等高布局
   // 依赖：activeTab === 'overview' 时才生效，scores/period 变化时重新测量
@@ -323,7 +338,10 @@ export default function App() {
       if (globalData) setGlobalIndex(globalData);
       if (provData) setProviderReliability(provData);
       if (recData) setRecommendations(recData);
-      if (syncData) setSyncStatus(syncData);
+      if (syncData) {
+        setSyncStatus(syncData);
+        knownLastSyncRef.current = syncData.lastSync;
+      }
       if (configData) setBlockedModels(configData.blocked_models || []);
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
@@ -350,11 +368,53 @@ export default function App() {
     }
   }, [period]);
 
+  /**
+   * 获取指定模型近 30 天历史评分数据
+   * 使用 AbortController 实现：新请求发起时自动中止上一次未完成的请求
+   */
+  const fetchModelHistory = useCallback(async (modelId: string) => {
+    if (modelHistoryAbortRef.current) {
+      modelHistoryAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    modelHistoryAbortRef.current = controller;
+    setIsLoadingModelHistory(true);
+    try {
+      const res = await fetch(`/api/model/history?id=${modelId}&days=30`, { signal: controller.signal });
+      const data = await res.json();
+      if (!controller.signal.aborted) {
+        setModelHistory(data);
+      }
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') return;
+      console.error('Fetch model history error:', e);
+      setModelHistory([]);
+    } finally {
+      if (!controller.signal.aborted) {
+        setIsLoadingModelHistory(false);
+      }
+    }
+  }, []);
+
+  // 后端同步完成后刷新仪表盘数据（含详情弹窗历史）
+  const refreshAfterBackendSync = useCallback(async (signal?: AbortSignal) => {
+    await fetchAll(signal);
+    await fetchHistory(signal);
+    if (detailModelRef.current) {
+      await fetchModelHistory(detailModelRef.current);
+    }
+    setDataUpdatedAt(new Date());
+  }, [fetchAll, fetchHistory, fetchModelHistory]);
+
+  useEffect(() => {
+    detailModelRef.current = detailModel;
+  }, [detailModel]);
+
   // 组件挂载时触发首次数据加载，并启动 /api/config 轮询（每 5 秒）
   // 使用 AbortController 管理生命周期：组件卸载时中止所有未完成的请求
   useEffect(() => {
     const controller = new AbortController();
-    fetchAll(controller.signal);
+    void fetchAll(controller.signal).then(() => setDataUpdatedAt(new Date()));
     const configInterval = setInterval(async () => {
       try {
         const res = await fetch('/api/config', { signal: controller.signal });
@@ -372,6 +432,83 @@ export default function App() {
     };
   }, [fetchAll]);
 
+  // 轮询 sync-status：lastSync 变化时自动刷新；标签页重新可见时立即检查
+  useEffect(() => {
+    const controller = new AbortController();
+
+    const pollSyncStatus = async () => {
+      try {
+        const res = await fetch('/api/sync-status', { signal: controller.signal });
+        if (!res.ok) return;
+        const data: SyncStatus = await res.json();
+        setSyncStatus(data);
+        const prev = knownLastSyncRef.current;
+        if (prev !== null && data.lastSync !== prev) {
+          await refreshAfterBackendSync(controller.signal);
+        } else {
+          knownLastSyncRef.current = data.lastSync;
+        }
+      } catch (e) {
+        if (e instanceof DOMException && e.name === 'AbortError') return;
+        console.error('Sync status poll error:', e);
+      }
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void pollSyncStatus();
+      }
+    };
+
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void pollSyncStatus();
+      }
+    }, SYNC_POLL_INTERVAL_MS);
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      controller.abort();
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [refreshAfterBackendSync]);
+
+  // nextSync 后兜底检查一次（防止轮询与后台同步时间错位）
+  useEffect(() => {
+    if (!syncStatus?.nextSync) return;
+    const due = new Date(syncStatus.nextSync).getTime() + SYNC_FALLBACK_DELAY_MS - Date.now();
+    if (due <= 0 || due > 20 * 60 * 1000) return;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      if (document.visibilityState !== 'visible') return;
+      void (async () => {
+        try {
+          const res = await fetch('/api/sync-status', { signal: controller.signal });
+          if (!res.ok) return;
+          const data: SyncStatus = await res.json();
+          setSyncStatus(data);
+          const prev = knownLastSyncRef.current;
+          if (prev !== null && data.lastSync !== prev) {
+            await refreshAfterBackendSync(controller.signal);
+          } else {
+            knownLastSyncRef.current = data.lastSync;
+          }
+        } catch (e) {
+          if (e instanceof DOMException && e.name === 'AbortError') return;
+          console.error('Sync fallback check error:', e);
+        }
+      })();
+    }, due);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [syncStatus?.nextSync, refreshAfterBackendSync]);
+
   // period 变化时重新加载历史数据，并使用 AbortController 取消上一次未完成的请求
   useEffect(() => {
     const controller = new AbortController();
@@ -384,8 +521,7 @@ export default function App() {
     setIsSyncing(true);
     try {
       await fetch('/api/sync-now', { method: 'POST' });
-      await fetchAll();
-      await fetchHistory();
+      await refreshAfterBackendSync();
     } catch { alert('同步失败'); }
     setIsSyncing(false);
   };
@@ -732,36 +868,6 @@ export default function App() {
     });
   };
 
-  // 模型详情历史请求的 AbortController 引用，用于取消上一次未完成的请求
-  const modelHistoryAbortRef = useRef<AbortController | null>(null);
-
-  /**
-   * 获取指定模型近 30 天历史评分数据
-   * 使用 AbortController 实现：新请求发起时自动中止上一次未完成的请求
-   * 请求完成后检查 signal.aborted，避免竞态条件下旧响应覆盖新数据
-   */
-  const fetchModelHistory = async (modelId: string) => {
-    if (modelHistoryAbortRef.current) {
-      modelHistoryAbortRef.current.abort();
-    }
-    const controller = new AbortController();
-    modelHistoryAbortRef.current = controller;
-    setIsLoadingModelHistory(true);
-    try {
-      const res = await fetch(`/api/model/history?id=${modelId}&days=30`, { signal: controller.signal });
-      const data = await res.json();
-      if (!controller.signal.aborted) {
-        setModelHistory(data);
-      }
-    } catch (e) {
-      if (e instanceof DOMException && e.name === 'AbortError') return;
-      console.error('Fetch model history error:', e);
-      setModelHistory([]);
-    } finally {
-      setIsLoadingModelHistory(false);
-    }
-  };
-
   /**
    * 打开模型详情弹窗：设置目标模型 ID、重置维度为综合得分、发起历史数据请求
    */
@@ -894,9 +1000,14 @@ export default function App() {
 
           <div className="flex items-center gap-2">
             {syncStatus && (
-              <div className="hidden md:flex items-center gap-2 text-[10px] text-textMuted mr-4">
-                <Clock size={12} />
-                <span>下次同步: {new Date(syncStatus.nextSync).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
+              <div className="hidden md:flex items-center gap-3 text-[10px] text-textMuted mr-4">
+                {dataUpdatedAt && (
+                  <span>数据更新: {dataUpdatedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
+                )}
+                <span className="flex items-center gap-1">
+                  <Clock size={12} />
+                  下次同步: {new Date(syncStatus.nextSync).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
+                </span>
               </div>
             )}
             <button

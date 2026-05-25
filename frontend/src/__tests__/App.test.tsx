@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import App from '../App'
 
 // Mock echarts-for-react to prevent canvas rendering issues in jsdom and inspect chart options
@@ -273,6 +273,10 @@ beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {})
 })
 
+afterEach(() => {
+  vi.useRealTimers()
+})
+
 describe('App - API and Fetch Integration Tests', () => {
   it('should show loading state initially while requests are pending', async () => {
     // Return a promise that does not resolve immediately to keep it in loading state
@@ -434,4 +438,44 @@ describe('App - API and Fetch Integration Tests', () => {
     expect(screen.getAllByRole('button', { name: '正确性' }).length).toBeGreaterThan(0)
     expect(screen.getAllByRole('button', { name: '代码质量' }).length).toBeGreaterThan(0)
   })
+
+  it('refetches dashboard data when lastSync changes on sync-status poll', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let lastSync = '2026-05-22T00:00:00Z'
+
+    mockFetch.mockImplementation((url: string) => {
+      if (url.includes('/api/sync-status')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            lastSync,
+            nextSync: '2026-05-22T00:10:00Z'
+          })
+        })
+      }
+      return defaultMockFetchImplementation(url)
+    })
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText('GPT-4o')).toBeInTheDocument()
+    })
+
+    const modelsCallsBefore = mockFetch.mock.calls.filter(call =>
+      String(call[0]).includes('/api/models')
+    ).length
+
+    lastSync = '2026-05-22T00:05:00Z'
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(45_000)
+    })
+
+    await waitFor(() => {
+      const modelsCallsAfter = mockFetch.mock.calls.filter(call =>
+        String(call[0]).includes('/api/models')
+      ).length
+      expect(modelsCallsAfter).toBeGreaterThan(modelsCallsBefore)
+    })
+  }, 10_000)
 })
